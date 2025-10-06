@@ -6224,11 +6224,14 @@ static void whisper_process_logits(
         // suppress <|notimestamps|> token
         // ref: https://github.com/openai/whisper/blob/0b1ba3d46ebf7fe6f953acfd8cad62a4f851b49f/whisper/decoding.py#L410-L412
         logits[vocab.token_not] = -INFINITY;
-        if (params.no_timestamps) {
-            for (int i = vocab.token_beg; i < n_logits; ++i) {
-                logits[i] = -INFINITY;
-            }
-        }
+        // NOTE: no longer suppressing timestamp tokens even when no_timestamps is true
+        // This allows the model to generate timestamps for better transcription quality
+        // The no_timestamps flag now only affects output formatting, not decoding
+        // if (params.no_timestamps) {
+        //     for (int i = vocab.token_beg; i < n_logits; ++i) {
+        //         logits[i] = -INFINITY;
+        //     }
+        // }
 
         // ref: https://github.com/ggml-org/whisper.cpp/pull/3798
         if (!params.no_timestamps && !params.single_segment && params.max_tokens > 0 && (int) tokens_cur.size() >= params.max_tokens) {
@@ -6994,9 +6997,12 @@ int whisper_full_with_state(
         }
     }
 
-    if (params.no_timestamps) {
-        prompt_init.push_back(whisper_token_not(ctx));
-    }
+    // NOTE: no longer adding <|notimestamps|> token even when no_timestamps is true
+    // This allows the model to use timestamp logic for better transcription quality
+    // The no_timestamps flag now only affects output formatting, not decoding
+    // if (params.no_timestamps) {
+    //     prompt_init.push_back(whisper_token_not(ctx));
+    // }
 
     int seek = seek_start;
 
