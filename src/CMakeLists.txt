@@ -148,6 +148,7 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(whisper PUBLIC ggml Threads::Threads)
+target_link_libraries(whisper PRIVATE termcolor::termcolor)
 
 if (WHISPER_COREML)
     target_link_libraries(whisper PRIVATE whisper.coreml)
