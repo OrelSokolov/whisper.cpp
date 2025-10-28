@@ -71,7 +71,7 @@ Voice Activity Detection (VAD) options:
 
 ## request examples
 
-**/inference**
+**/inference** (returns complete result after processing)
 ```
 curl 127.0.0.1:8080/inference \
 -H "Content-Type: multipart/form-data" \
@@ -79,6 +79,44 @@ curl 127.0.0.1:8080/inference \
 -F temperature="0.0" \
 -F temperature_inc="0.2" \
 -F response_format="json"
+```
+
+**/inference-stream** (streams results in real-time via Server-Sent Events)
+```bash
+curl 127.0.0.1:8080/inference-stream \
+-H "Content-Type: multipart/form-data" \
+-F file="@<file-path>" \
+-F temperature="0.0" \
+-F temperature_inc="0.2" \
+-N
+```
+
+The streaming endpoint returns Server-Sent Events (SSE) with the following event types:
+
+**Event: start**
+```json
+{"type": "start", "filename": "audio.wav"}
+```
+
+**Event: segment** (sent for each transcribed segment)
+```json
+{
+  "type": "segment",
+  "index": 0,
+  "text": " Hello, world!",
+  "start": 0.0,
+  "end": 2.5
+}
+```
+
+**Event: done** (sent when transcription is complete)
+```json
+{"type": "done"}
+```
+
+**Event: error** (sent if an error occurs)
+```json
+{"type": "error", "message": "error description"}
 ```
 
 **/load**

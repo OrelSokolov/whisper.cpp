@@ -795,6 +795,249 @@ int main(int argc, char ** argv) {
     svr->Options(sparams.request_path + sparams.inference_path, [&](const Request &, Response &){
     });
 
+    // SSE streaming endpoint for real-time transcription
+    svr->Post(sparams.request_path + "/inference-stream", [&](const Request &req, Response &res){
+        // acquire whisper model mutex lock
+        std::lock_guard<std::mutex> lock(whisper_mutex);
+
+        // first check user requested fields of the request
+        if (!req.has_file("file"))
+        {
+            fprintf(stderr, "error: no 'file' field in the request\n");
+            const std::string error_resp = "{\"error\":\"no 'file' field in the request\"}";
+            res.set_content(error_resp, "application/json");
+            return;
+        }
+        auto audio_file = req.get_file_value("file");
+
+        // check non-required fields
+        get_req_parameters(req, params);
+
+        std::string filename{audio_file.filename};
+        printf("Received streaming request: %s\n", filename.c_str());
+
+        // audio arrays
+        std::vector<float> pcmf32;               // mono-channel F32 PCM
+        std::vector<std::vector<float>> pcmf32s; // stereo-channel F32 PCM
+
+        if (sparams.ffmpeg_converter) {
+            // if file is not wav, convert to wav
+            // write to temporary file
+            const std::string temp_filename = generate_temp_filename("whisper-server", ".wav");
+            std::ofstream temp_file{temp_filename, std::ios::binary};
+            temp_file << audio_file.content;
+            temp_file.close();
+
+            std::string error_resp = "{\"error\":\"Failed to execute ffmpeg command.\"}";
+            const bool is_converted = convert_to_wav(temp_filename, error_resp);
+            if (!is_converted) {
+                res.set_content(error_resp, "application/json");
+                return;
+            }
+
+            // read audio content into pcmf32
+            if (!::read_audio_data(temp_filename, pcmf32, pcmf32s, params.diarize))
+            {
+                fprintf(stderr, "error: failed to read WAV file '%s'\n", temp_filename.c_str());
+                const std::string error_resp = "{\"error\":\"failed to read WAV file\"}";
+                res.set_content(error_resp, "application/json");
+                std::remove(temp_filename.c_str());
+                return;
+            }
+            // remove temp file
+            std::remove(temp_filename.c_str());
+        } else {
+            if (!::read_audio_data(audio_file.content, pcmf32, pcmf32s, params.diarize))
+            {
+                fprintf(stderr, "error: failed to read audio data\n");
+                const std::string error_resp = "{\"error\":\"failed to read audio data\"}";
+                res.set_content(error_resp, "application/json");
+                return;
+            }
+        }
+
+        printf("Successfully loaded %s for streaming\n", filename.c_str());
+
+        // print system information
+        {
+            fprintf(stderr, "\n");
+            fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
+                    params.n_threads*params.n_processors, std::thread::hardware_concurrency(), whisper_print_system_info());
+        }
+
+        // print some info about the processing
+        {
+            fprintf(stderr, "\n");
+            if (!whisper_is_multilingual(ctx)) {
+                if (params.language != "en" || params.translate) {
+                    params.language = "en";
+                    params.translate = false;
+                    fprintf(stderr, "%s: WARNING: model is not multilingual, ignoring language and translation options\n", __func__);
+                }
+            }
+            if (params.detect_language) {
+                params.language = "auto";
+            }
+            fprintf(stderr, "%s: streaming '%s' (%d samples, %.1f sec), %d threads, %d processors, lang = %s, task = %s, %stimestamps = %d ...\n",
+                    __func__, filename.c_str(), int(pcmf32.size()), float(pcmf32.size())/WHISPER_SAMPLE_RATE,
+                    params.n_threads, params.n_processors,
+                    params.language.c_str(),
+                    params.translate ? "translate" : "transcribe",
+                    params.tinydiarize ? "tdrz = 1, " : "",
+                    params.no_timestamps ? 0 : 1);
+
+            fprintf(stderr, "\n");
+        }
+
+        // Setup SSE headers
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        res.set_header("Access-Control-Allow-Origin", "*");
+
+        // Use content provider for streaming
+        res.set_content_provider(
+            "text/event-stream",
+            [&, pcmf32, pcmf32s, filename](size_t /*offset*/, httplib::DataSink &sink) {
+                // run the inference with streaming callback
+                whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+
+                wparams.strategy = params.beam_size > 1 ? WHISPER_SAMPLING_BEAM_SEARCH : WHISPER_SAMPLING_GREEDY;
+
+                wparams.print_realtime   = false;
+                wparams.print_progress   = params.print_progress;
+                wparams.print_timestamps = !params.no_timestamps;
+                wparams.print_special    = params.print_special;
+                wparams.translate        = params.translate;
+                wparams.language         = params.language.c_str();
+                wparams.detect_language  = params.detect_language;
+                wparams.n_threads        = params.n_threads;
+                wparams.n_max_text_ctx   = params.max_context >= 0 ? params.max_context : wparams.n_max_text_ctx;
+                wparams.offset_ms        = params.offset_t_ms;
+                wparams.duration_ms      = params.duration_ms;
+
+                wparams.thold_pt         = params.word_thold;
+                wparams.max_len          = params.max_len == 0 ? 60 : params.max_len;
+                wparams.split_on_word    = params.split_on_word;
+                wparams.audio_ctx        = params.audio_ctx;
+
+                wparams.debug_mode       = params.debug_mode;
+
+                wparams.tdrz_enable      = params.tinydiarize; // [TDRZ]
+
+                wparams.initial_prompt   = params.prompt.c_str();
+
+                wparams.greedy.best_of        = params.best_of;
+                wparams.beam_search.beam_size = params.beam_size;
+
+                wparams.temperature      = params.temperature;
+                wparams.no_speech_thold = params.no_speech_thold;
+                wparams.temperature_inc  = params.temperature_inc;
+                wparams.entropy_thold    = params.entropy_thold;
+                wparams.logprob_thold    = params.logprob_thold;
+
+                wparams.no_timestamps    = params.no_timestamps;
+                wparams.token_timestamps = !params.no_timestamps;
+                wparams.no_context       = params.no_context;
+
+                wparams.suppress_nst     = params.suppress_nst;
+
+                wparams.vad              = params.vad;
+                wparams.vad_model_path   = params.vad_model.c_str();
+
+                wparams.vad_params.threshold               = params.vad_threshold;
+                wparams.vad_params.min_speech_duration_ms  = params.vad_min_speech_duration_ms;
+                wparams.vad_params.min_silence_duration_ms = params.vad_min_silence_duration_ms;
+                wparams.vad_params.max_speech_duration_s   = params.vad_max_speech_duration_s;
+                wparams.vad_params.speech_pad_ms           = params.vad_speech_pad_ms;
+                wparams.vad_params.samples_overlap         = params.vad_samples_overlap;
+
+                // Custom streaming callback
+                struct streaming_context {
+                    httplib::DataSink* sink;
+                    const whisper_params* params;
+                    const std::vector<std::vector<float>>* pcmf32s;
+                };
+
+                streaming_context stream_ctx = { &sink, &params, &pcmf32s };
+
+                // Callback that sends SSE events for each new segment
+                wparams.new_segment_callback = [](struct whisper_context * ctx, struct whisper_state * /*state*/, int n_new, void * user_data) {
+                    auto* stream_ctx = static_cast<streaming_context*>(user_data);
+                    const auto & params  = *stream_ctx->params;
+                    const auto & pcmf32s = *stream_ctx->pcmf32s;
+                    auto& sink = *stream_ctx->sink;
+
+                    const int n_segments = whisper_full_n_segments(ctx);
+                    const int s0 = n_segments - n_new;
+
+                    // Send each new segment as SSE event
+                    for (int i = s0; i < n_segments; i++) {
+                        const char * text = whisper_full_get_segment_text(ctx, i);
+                        
+                        json segment_json = json{
+                            {"type", "segment"},
+                            {"index", i},
+                            {"text", text}
+                        };
+
+                        if (!params.no_timestamps) {
+                            const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                            const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                            segment_json["start"] = t0 * 0.01;
+                            segment_json["end"] = t1 * 0.01;
+                        }
+
+                        if (params.diarize && pcmf32s.size() == 2) {
+                            const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                            const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                            std::string speaker = estimate_diarization_speaker(pcmf32s, t0, t1, true);
+                            segment_json["speaker"] = speaker;
+                        }
+
+                        // Format as SSE event
+                        std::string sse_data = "data: " + segment_json.dump() + "\n\n";
+                        sink.write(sse_data.c_str(), sse_data.size());
+                    }
+                };
+                wparams.new_segment_callback_user_data = &stream_ctx;
+
+                // tell whisper to abort if the HTTP connection closed
+                wparams.abort_callback = [](void *user_data) {
+                    auto req_ptr = static_cast<const httplib::Request*>(user_data);
+                    return req_ptr->is_connection_closed();
+                };
+                wparams.abort_callback_user_data = (void*)&req;
+
+                // Send start event
+                std::string start_event = "data: " + json{{"type", "start"}, {"filename", filename}}.dump() + "\n\n";
+                sink.write(start_event.c_str(), start_event.size());
+
+                // Run inference
+                if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
+                    if (req.is_connection_closed()) {
+                        fprintf(stderr, "client disconnected during streaming\n");
+                        std::string error_event = "data: " + json{{"type", "error"}, {"message", "client disconnected"}}.dump() + "\n\n";
+                        sink.write(error_event.c_str(), error_event.size());
+                    } else {
+                        std::string error_event = "data: " + json{{"type", "error"}, {"message", "failed to process audio"}}.dump() + "\n\n";
+                        sink.write(error_event.c_str(), error_event.size());
+                    }
+                    return false;
+                }
+
+                // Send done event
+                std::string done_event = "data: " + json{{"type", "done"}}.dump() + "\n\n";
+                sink.write(done_event.c_str(), done_event.size());
+
+                return false;  // false = stream is complete, don't call again
+            }
+        );
+
+        // reset params to their defaults
+        params = default_params;
+    });
+
     svr->Post(sparams.request_path + sparams.inference_path, [&](const Request &req, Response &res){
         // acquire whisper model mutex lock
         std::lock_guard<std::mutex> lock(whisper_mutex);
