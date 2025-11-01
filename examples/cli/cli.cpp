@@ -15,12 +15,16 @@
 #include <cstring>
 #include <cfloat>
 
-#include <termcolor/termcolor.hpp>
-
 #if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#endif
+
+#include <termcolor/termcolor.hpp>
+
+#if defined(_WIN32)
 #include <windows.h>
 #endif
 
