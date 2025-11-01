@@ -64,3 +64,8 @@ cmake-build-debug/
 local.properties
 .log
 .exe
+
+# Worker configuration (contains secrets)
+worker.env
+*.worker.env
+.env.worker

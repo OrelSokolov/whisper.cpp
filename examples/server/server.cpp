@@ -619,6 +619,7 @@ int main(int argc, char ** argv) {
     server_params sparams;
 
     std::mutex whisper_mutex;
+    time_t server_start_time = time(nullptr);
 
     if (whisper_params_parse(argc, argv, params, sparams) == false) {
         whisper_print_usage(argc, argv, params, sparams);
@@ -814,7 +815,12 @@ int main(int argc, char ** argv) {
         get_req_parameters(req, params);
 
         std::string filename{audio_file.filename};
-        printf("Received streaming request: %s\n", filename.c_str());
+        std::string job_id = "unknown";
+        if (req.has_file("job_id")) {
+            job_id = req.get_file_value("job_id").content;
+        }
+        
+        printf("Received streaming request: %s (job_id: %s)\n", filename.c_str(), job_id.c_str());
 
         // audio arrays
         std::vector<float> pcmf32;               // mono-channel F32 PCM
@@ -898,7 +904,7 @@ int main(int argc, char ** argv) {
         // Use content provider for streaming
         res.set_content_provider(
             "text/event-stream",
-            [&, pcmf32, pcmf32s, filename](size_t /*offset*/, httplib::DataSink &sink) {
+            [&, pcmf32, pcmf32s, filename, job_id](size_t /*offset*/, httplib::DataSink &sink) {
                 // run the inference with streaming callback
                 whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
@@ -957,15 +963,17 @@ int main(int argc, char ** argv) {
                     httplib::DataSink* sink;
                     const whisper_params* params;
                     const std::vector<std::vector<float>>* pcmf32s;
+                    const std::string* job_id;
                 };
 
-                streaming_context stream_ctx = { &sink, &params, &pcmf32s };
+                streaming_context stream_ctx = { &sink, &params, &pcmf32s, &job_id };
 
                 // Callback that sends SSE events for each new segment
                 wparams.new_segment_callback = [](struct whisper_context * ctx, struct whisper_state * /*state*/, int n_new, void * user_data) {
                     auto* stream_ctx = static_cast<streaming_context*>(user_data);
                     const auto & params  = *stream_ctx->params;
                     const auto & pcmf32s = *stream_ctx->pcmf32s;
+                    const auto & job_id  = *stream_ctx->job_id;
                     auto& sink = *stream_ctx->sink;
 
                     const int n_segments = whisper_full_n_segments(ctx);
@@ -977,6 +985,7 @@ int main(int argc, char ** argv) {
                         
                         json segment_json = json{
                             {"type", "segment"},
+                            {"job_id", job_id},
                             {"index", i},
                             {"text", text}
                         };
@@ -1010,24 +1019,24 @@ int main(int argc, char ** argv) {
                 wparams.abort_callback_user_data = (void*)&req;
 
                 // Send start event
-                std::string start_event = "data: " + json{{"type", "start"}, {"filename", filename}}.dump() + "\n\n";
+                std::string start_event = "data: " + json{{"type", "start"}, {"job_id", job_id}, {"filename", filename}}.dump() + "\n\n";
                 sink.write(start_event.c_str(), start_event.size());
 
                 // Run inference
                 if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
                     if (req.is_connection_closed()) {
                         fprintf(stderr, "client disconnected during streaming\n");
-                        std::string error_event = "data: " + json{{"type", "error"}, {"message", "client disconnected"}}.dump() + "\n\n";
+                        std::string error_event = "data: " + json{{"type", "error"}, {"job_id", job_id}, {"message", "client disconnected"}}.dump() + "\n\n";
                         sink.write(error_event.c_str(), error_event.size());
                     } else {
-                        std::string error_event = "data: " + json{{"type", "error"}, {"message", "failed to process audio"}}.dump() + "\n\n";
+                        std::string error_event = "data: " + json{{"type", "error"}, {"job_id", job_id}, {"message", "failed to process audio"}}.dump() + "\n\n";
                         sink.write(error_event.c_str(), error_event.size());
                     }
                     return false;
                 }
 
                 // Send done event
-                std::string done_event = "data: " + json{{"type", "done"}}.dump() + "\n\n";
+                std::string done_event = "data: " + json{{"type", "done"}, {"job_id", job_id}}.dump() + "\n\n";
                 sink.write(done_event.c_str(), done_event.size());
 
                 return false;  // false = stream is complete, don't call again
@@ -1399,11 +1408,26 @@ int main(int argc, char ** argv) {
 
     svr->Get(sparams.request_path + "/health", [&](const Request &, Response &res){
         server_state current_state = state.load();
+        
+        json health = {
+            {"status", current_state == SERVER_STATE_READY ? "healthy" : "loading"},
+            {"model", params.model},
+            {"model_name", params.model.substr(params.model.find_last_of("/\\") + 1)},
+            {"uptime_seconds", time(nullptr) - server_start_time},
+            {"version", "1.0.0"}
+        };
+        
         if (current_state == SERVER_STATE_READY) {
-            const std::string health_response = "{\"status\":\"ok\"}";
-            res.set_content(health_response, "application/json");
+            health["capabilities"] = {
+                {"multilingual", whisper_is_multilingual(ctx)},
+                {"gpu_enabled", params.use_gpu},
+                {"flash_attn", params.flash_attn},
+                {"supports_streaming", true},
+                {"ffmpeg_converter", sparams.ffmpeg_converter}
+            };
+            res.set_content(health.dump(), "application/json");
         } else {
-            res.set_content("{\"status\":\"loading model\"}", "application/json");
+            res.set_content(health.dump(), "application/json");
             res.status = 503;
         }
     });

@@ -1,0 +1,37 @@
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /whisper.cpp
+
+# Copy source code
+COPY . .
+
+# Build whisper.cpp with CUDA support
+RUN cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --config Release --target whisper-server
+
+# Default environment variables
+ENV WORKER_PORT=8080
+ENV MODEL=models/ggml-base.en.bin
+ENV WHISPER_BIN=/whisper.cpp/build/bin/whisper-server
+ENV HEARTBEAT_INTERVAL=20
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${WORKER_PORT}/health || exit 1
+
+# Run worker script
+ENTRYPOINT ["/whisper.cpp/scripts/whisper-worker.sh"]
+

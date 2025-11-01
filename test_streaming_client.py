@@ -7,6 +7,7 @@
 import requests
 import json
 import sys
+import time
 
 def stream_transcription(audio_file_path, server_url="http://127.0.0.1:8080"):
     """
@@ -17,6 +18,10 @@ def stream_transcription(audio_file_path, server_url="http://127.0.0.1:8080"):
     print(f"📤 Uploading: {audio_file_path}")
     print(f"🌐 Server: {endpoint}")
     print("=" * 70)
+    
+    # Засекаем время начала
+    start_time = time.time()
+    first_segment_time = None
     
     try:
         # Открываем файл и отправляем
@@ -54,10 +59,24 @@ def stream_transcription(audio_file_path, server_url="http://127.0.0.1:8080"):
                         json_str = line[6:]  # убираем "data: "
                         try:
                             event = json.loads(json_str)
+                            
+                            # Засекаем время первого сегмента
+                            if first_segment_time is None and event.get('type') == 'segment':
+                                first_segment_time = time.time()
+                            
                             handle_event(event)
                         except json.JSONDecodeError as e:
                             print(f"⚠️  Failed to parse: {e}")
                             print(f"   Raw: {line}")
+            
+            # Подсчитываем общее время
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            print(f"\n⏱️  Общее время запроса: {total_time:.2f}s")
+            if first_segment_time:
+                ttfs = first_segment_time - start_time  # Time To First Segment
+                print(f"⚡ Время до первого сегмента: {ttfs:.2f}s")
     
     except FileNotFoundError:
         print(f"❌ Error: File not found: {audio_file_path}")
