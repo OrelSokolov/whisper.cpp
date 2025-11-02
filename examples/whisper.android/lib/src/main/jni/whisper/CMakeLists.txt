@@ -29,6 +29,15 @@ find_library(LOG_LIB log)
 
 include(FetchContent)
 
+# Add termcolor for colored terminal output
+FetchContent_Declare(
+    termcolor
+    GIT_REPOSITORY https://github.com/ikalnytskyi/termcolor.git
+    GIT_TAG        v2.1.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(termcolor)
+
 function(build_library target_name)
     add_library(
         ${target_name}
@@ -64,7 +73,7 @@ function(build_library target_name)
     endif()
     FetchContent_MakeAvailable(ggml)
     target_compile_options(ggml PRIVATE ${GGML_COMPILE_OPTIONS})
-    target_link_libraries(${target_name} ${LOG_LIB} android ggml)
+    target_link_libraries(${target_name} ${LOG_LIB} android ggml termcolor::termcolor)
 
 
 endfunction()
