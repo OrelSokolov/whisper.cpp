@@ -1,0 +1,24 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    base64 (0.3.0)
+    event_emitter (0.2.6)
+    json (2.15.2)
+    mutex_m (0.3.0)
+    websocket (1.2.11)
+    websocket-client-simple (0.9.0)
+      base64
+      event_emitter
+      mutex_m
+      websocket
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  json (~> 2.6)
+  websocket-client-simple (~> 0.7)
+
+BUNDLED WITH
+   2.7.1

@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+# WebSocket клиент для подключения к whisper-worker серверу
+gem 'websocket-client-simple', '~> 0.7'
+
+# JSON парсинг (обычно входит в стандартную библиотеку Ruby, но указан для совместимости)
+gem 'json', '~> 2.6'
+
+# Опционально: для лучшей обработки опций командной строки
+# gem 'optparse' # Входит в стандартную библиотеку Ruby
+
