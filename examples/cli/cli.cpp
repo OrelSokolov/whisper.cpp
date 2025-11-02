@@ -922,6 +922,16 @@ static void output_lrc(struct whisper_context * ctx, std::ofstream & fout, const
     }
 }
 
+static void benchmark_cli_factor(float audio_duration_sec, int64_t t_start_us, int64_t t_end_us) {
+    const float total_time_ms = (t_end_us - t_start_us) / 1000.0f;
+    const float realtime_factor = audio_duration_sec / (total_time_ms / 1000.0f);
+    
+    fprintf(stderr, "\n");
+    fprintf(stderr, "%s: audio duration  = %8.2f sec\n", __func__, audio_duration_sec);
+    fprintf(stderr, "%s: total time      = %8.2f ms\n", __func__, total_time_ms);
+    fprintf(stderr, "%s: realtime factor = %8.2fx\n", __func__, realtime_factor);
+}
+
 
 static void cb_log_disable(enum ggml_log_level , const char * , void * ) { }
 
@@ -1206,6 +1216,8 @@ int main(int argc, char ** argv) {
         }
 
         // run the inference
+        int64_t t_start_process_us = 0;
+        int64_t t_end_process_us = 0;
         {
             whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
@@ -1315,10 +1327,12 @@ int main(int argc, char ** argv) {
                 wparams.abort_callback_user_data = &is_aborted;
             }
 
+            t_start_process_us = ggml_time_us();
             if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                 return 10;
             }
+            t_end_process_us = ggml_time_us();
             
             // Add newline after transcription output for clean formatting
             if (!params.no_prints) {
@@ -1350,6 +1364,12 @@ int main(int argc, char ** argv) {
             if (fout_factory.is_stdout && !fout_factory.used_stdout) {
                 fprintf(stderr, "warning: '--output-file -' used without any other '--output-*'");
             }
+        }
+        
+        // Print benchmark real-time factor for this file
+        if (!params.no_prints && params.verbose) {
+            const float audio_duration_sec = float(pcmf32.size()) / WHISPER_SAMPLE_RATE;
+            benchmark_cli_factor(audio_duration_sec, t_start_process_us, t_end_process_us);
         }
     }
 
