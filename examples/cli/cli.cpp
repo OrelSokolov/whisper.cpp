@@ -10,6 +10,7 @@
 #include <fstream>
 #include <cstdio>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <thread>
 #include <vector>
@@ -926,10 +927,12 @@ static void benchmark_cli_factor(float audio_duration_sec, int64_t t_start_us, i
     const float total_time_ms = (t_end_us - t_start_us) / 1000.0f;
     const float realtime_factor = audio_duration_sec / (total_time_ms / 1000.0f);
     
-    fprintf(stderr, "\n");
-    fprintf(stderr, "%s: audio duration  = %8.2f sec\n", __func__, audio_duration_sec);
-    fprintf(stderr, "%s: total time      = %8.2f ms\n", __func__, total_time_ms);
-    fprintf(stderr, "%s: realtime factor = %8.2fx\n", __func__, realtime_factor);
+    std::cerr << termcolor::cyan;
+    std::cerr << "\n";
+    std::cerr << __func__ << ": audio duration  = " << std::fixed << std::setprecision(2) << std::setw(8) << audio_duration_sec << " sec\n";
+    std::cerr << __func__ << ": total time      = " << std::fixed << std::setprecision(2) << std::setw(8) << total_time_ms << " ms\n";
+    std::cerr << __func__ << ": realtime factor = " << std::fixed << std::setprecision(2) << std::setw(8) << realtime_factor << "x\n";
+    std::cerr << termcolor::reset;
 }
 
 
@@ -1120,6 +1123,11 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "\n");
         }
     }
+
+    // Variables to store timing info for benchmark (printed after whisper_print_timings)
+    float last_audio_duration_sec = 0.0f;
+    int64_t last_t_start_process_us = 0;
+    int64_t last_t_end_process_us = 0;
 
     for (int f = 0; f < (int) params.fname_inp.size(); ++f) {
         const auto & fname_inp = params.fname_inp[f];
@@ -1366,15 +1374,23 @@ int main(int argc, char ** argv) {
             }
         }
         
-        // Print benchmark real-time factor for this file
+        // Store timing info for benchmark (will be printed after whisper_print_timings)
+        // Only store for the last file if processing multiple files
         if (!params.no_prints && params.verbose) {
             const float audio_duration_sec = float(pcmf32.size()) / WHISPER_SAMPLE_RATE;
-            benchmark_cli_factor(audio_duration_sec, t_start_process_us, t_end_process_us);
+            last_audio_duration_sec = audio_duration_sec;
+            last_t_start_process_us = t_start_process_us;
+            last_t_end_process_us = t_end_process_us;
         }
     }
 
     if (!params.no_prints && params.verbose) {
         whisper_print_timings(ctx);
+        
+        // Print benchmark real-time factor after timings
+        if (last_audio_duration_sec > 0.0f && last_t_end_process_us > last_t_start_process_us) {
+            benchmark_cli_factor(last_audio_duration_sec, last_t_start_process_us, last_t_end_process_us);
+        }
     }
     whisper_free(ctx);
 
