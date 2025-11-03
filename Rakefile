@@ -34,6 +34,27 @@ namespace :build do
     puts "\n✓ Built: #{BUILD_DIR}/bin/whisper-cli"
   end
 
+  namespace :rust do
+    desc "Build whisper-worker-rs executable (Release mode)"
+    task :worker do
+      ensure_configured
+      worker_rs_dir = 'examples/worker-rs'
+      unless File.directory?(worker_rs_dir)
+        puts "Error: #{worker_rs_dir} directory not found"
+        exit 1
+      end
+      
+      Dir.chdir(worker_rs_dir) do
+        puts "Building Rust worker in #{worker_rs_dir}..."
+        unless system('cargo build --release')
+          puts "\n✗ Build failed"
+          exit 1
+        end
+        puts "\n✓ Built: #{worker_rs_dir}/target/release/whisper-worker-rs"
+      end
+    end
+  end
+
   desc "Build all examples and targets (Release mode)"
   task :all do
     ensure_configured
@@ -139,11 +160,12 @@ task :help do
     ======================
 
     Build Tasks (all use Release mode by default):
-      rake build:worker    - Build whisper-worker executable
-      rake build:cli       - Build whisper-cli executable
-      rake build:all       - Build all examples and targets
-      rake build:clean     - Clean build directory
-      rake build:configure - Configure CMake build system
+      rake build:worker         - Build whisper-worker executable (C++)
+      rake build:rust:worker   - Build whisper-worker-rs executable (Rust)
+      rake build:cli            - Build whisper-cli executable
+      rake build:all            - Build all examples and targets
+      rake build:clean          - Clean build directory
+      rake build:configure      - Configure CMake build system
 
     Configuration Tasks (all use Release mode by default):
       rake configure:vulkan - Configure with Vulkan GPU support
@@ -164,6 +186,7 @@ task :help do
     Examples:
       rake configure:vulkan && rake build:worker
       rake configure:nvidia && rake build:cli
+      rake build:rust:worker
       rake build:all
       rake spec:punctuation
 
