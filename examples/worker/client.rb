@@ -13,7 +13,7 @@
 #
 # Примеры:
 #   bundle exec ruby client.rb audio.wav
-#   ruby client.rb -h 192.168.1.100 -p 8765 audio.mp3
+#   ruby client.rb --host 192.168.1.100 --port 8765 audio.mp3
 #
 # Требования:
 #   bundle install
@@ -42,15 +42,15 @@ options = {
 OptionParser.new do |opts|
   opts.banner = "Использование: #{$0} [опции] <файл>"
   
-  opts.on('-h', '--host HOST', 'Хост сервера (по умолчанию: localhost)') do |host|
+  opts.on('--host HOST', 'Хост сервера (по умолчанию: localhost)') do |host|
     options[:host] = host
   end
   
-  opts.on('-p', '--port PORT', Integer, 'Порт сервера (по умолчанию: 8765)') do |port|
+  opts.on('--port PORT', Integer, 'Порт сервера (по умолчанию: 8765)') do |port|
     options[:port] = port
   end
   
-  opts.on('--help', 'Показать эту справку') do
+  opts.on('-h', '--help', 'Показать эту справку') do
     puts opts
     exit
   end
