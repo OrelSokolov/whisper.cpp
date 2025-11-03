@@ -85,6 +85,7 @@ struct whisper_params {
     bool suppress_nst    = false;
     bool verbose         = false;
     bool carry_initial_prompt = false;
+    bool language_set_by_user = false;
 
     std::string language  = "en";
     std::string prompt;
@@ -191,7 +192,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (                  arg == "--print-confidence")     { params.print_confidence= true; }
         else if (arg == "-pp"   || arg == "--print-progress")       { params.print_progress  = true; }
         else if (arg == "-nt"   || arg == "--no-timestamps")        { params.no_timestamps   = true; }
-        else if (arg == "-l"    || arg == "--language")             { params.language        = whisper_param_turn_lowercase(ARGV_NEXT); }
+        else if (arg == "-l"    || arg == "--language")             { params.language        = whisper_param_turn_lowercase(ARGV_NEXT); params.language_set_by_user = true; }
         else if (arg == "-dl"   || arg == "--detect-language")      { params.detect_language = true; }
         else if (                  arg == "--prompt")               { params.prompt          = ARGV_NEXT; }
         else if (                  arg == "--carry-initial-prompt") { params.carry_initial_prompt = true; }
@@ -1193,6 +1194,11 @@ int main(int argc, char ** argv) {
                 params.language = "en";
                 params.translate = false;
                 fprintf(stderr, "%s: WARNING: model is not multilingual, ignoring language and translation options\n", __func__);
+            }
+        } else {
+            // For multilingual models, if language is not explicitly set by user (defaults to "en"), use auto-detection
+            if (!params.language_set_by_user && params.language == "en" && !params.detect_language) {
+                params.language = "auto";
             }
         }
         if (params.detect_language) {

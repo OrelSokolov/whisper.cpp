@@ -105,6 +105,33 @@ namespace :configure do
   end
 end
 
+namespace :spec do
+  desc "Run all RSpec tests"
+  task :all do
+    sh 'bundle exec rspec'
+  end
+
+  desc "Run integration tests"
+  task :integration do
+    sh 'bundle exec rspec spec/integration'
+  end
+
+  desc "Run punctuation test"
+  task :punctuation do
+    sh 'bundle exec rspec spec/integration/punctuation_spec.rb'
+  end
+
+  desc "Run worker punctuation test"
+  task :worker_punctuation do
+    sh 'bundle exec rspec spec/integration/worker_punctuation_spec.rb'
+  end
+
+  desc "Run one worker punctuation test (single worker for all runs)"
+  task :one_worker_punctuation do
+    sh 'bundle exec rspec spec/integration/one_worker_punctuation_spec.rb'
+  end
+end
+
 desc "Show available tasks"
 task :help do
   puts <<~HELP
@@ -124,6 +151,13 @@ task :help do
       rake configure:metal  - Configure with Metal support (macOS only)
       rake configure:default - Configure default build (CPU only)
 
+    Test Tasks:
+      rake spec:all                    - Run all RSpec tests
+      rake spec:integration            - Run integration tests
+      rake spec:punctuation            - Run punctuation test (CLI)
+      rake spec:worker_punctuation     - Run worker punctuation test (new worker per run)
+      rake spec:one_worker_punctuation - Run worker punctuation test (single worker for all runs)
+
     Note: All builds use Release mode by default. Debug builds are not configured
     by default to ensure optimal performance and smaller binary sizes.
 
@@ -131,6 +165,7 @@ task :help do
       rake configure:vulkan && rake build:worker
       rake configure:nvidia && rake build:cli
       rake build:all
+      rake spec:punctuation
 
   HELP
 end

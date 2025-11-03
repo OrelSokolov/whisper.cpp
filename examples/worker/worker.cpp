@@ -238,6 +238,7 @@ struct whisper_params {
     bool diarize         = false;
     bool tinydiarize     = false;
     bool split_on_word   = false;
+    bool no_context      = false;
     bool no_fallback     = false;
     bool print_special   = false;
     bool print_colors    = false;
@@ -466,6 +467,7 @@ bool process_audio_websocket(int socket, const std::vector<uint8_t>& audio_data)
     wparams.print_progress   = false;
     wparams.print_timestamps = !g_params.no_timestamps;
     wparams.print_special    = g_params.print_special;
+    wparams.no_context       = g_params.no_context;
     wparams.translate        = g_params.translate;
     wparams.language         = g_params.language.c_str();
     wparams.detect_language  = g_params.detect_language;
@@ -488,7 +490,8 @@ bool process_audio_websocket(int socket, const std::vector<uint8_t>& audio_data)
     // IMPORTANT: Disable carry_initial_prompt for worker
     // to avoid contamination between different requests (each request should be independent)
     // NOTE: no_context affects segments WITHIN a single transcription, not between requests
-    // Setting no_context=true degrades quality (missing punctuation, capitalization)
+    // Setting no_context=true degrades quality (missing punctuation, capitalization),
+    // so we default to keeping context unless the user explicitly disables it.
     wparams.carry_initial_prompt = false;
     wparams.greedy.best_of        = g_params.best_of;
     wparams.beam_search.beam_size = g_params.beam_size;
@@ -700,6 +703,8 @@ bool parse_args(int argc, char ** argv, whisper_params & params) {
             fprintf(stderr, "  -l, --language LANG     Language (default: %s)\n", params.language.c_str());
             fprintf(stderr, "  -tr, --translate        Translate to English\n");
             fprintf(stderr, "  -nt, --no-timestamps    Don't print timestamps\n");
+            fprintf(stderr, "  -nc, --no-context       Disable cross-segment context (default: keep)\n");
+            fprintf(stderr, "  -kc, --keep-context     Explicitly keep context between segments (default)\n");
             fprintf(stderr, "  -v, --verbose           Verbose output\n");
             return false;
         } else if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
@@ -710,6 +715,10 @@ bool parse_args(int argc, char ** argv, whisper_params & params) {
             params.n_processors = std::stoi(argv[++i]);
         } else if ((arg == "-l" || arg == "--language") && i + 1 < argc) {
             params.language = argv[++i];
+        } else if (arg == "-nc" || arg == "--no-context") {
+            params.no_context = true;
+        } else if (arg == "-kc" || arg == "--keep-context") {
+            params.no_context = false;
         } else if (arg == "-tr" || arg == "--translate") {
             params.translate = true;
         } else if (arg == "-nt" || arg == "--no-timestamps") {
