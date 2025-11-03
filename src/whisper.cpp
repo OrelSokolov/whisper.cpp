@@ -4326,8 +4326,8 @@ const char * whisper_print_system_info(void) {
 
     s  = "";
     s += "WHISPER : ";
-    s += "COREML = "    + std::to_string(whisper_has_coreml())     + " | ";
-    s += "OPENVINO = "  + std::to_string(whisper_has_openvino())   + " | ";
+    s += "COREML = "    + std::string(whisper_has_coreml()   ? "Yes" : "No") + " | ";
+    s += "OPENVINO = "  + std::string(whisper_has_openvino() ? "Yes" : "No") + " | ";
 
     for (size_t i = 0; i < ggml_backend_reg_count(); i++) {
         auto * reg = ggml_backend_reg_get(i);
@@ -4339,7 +4339,14 @@ const char * whisper_print_system_info(void) {
             for (; features->name; features++) {
                 s += features->name;
                 s += " = ";
-                s += features->value;
+                // Convert "0"/"1" to "No"/"Yes" if feature value is single digit
+                std::string value = features->value;
+                if (value == "0") {
+                    value = "No";
+                } else if (value == "1") {
+                    value = "Yes";
+                }
+                s += value;
                 s += " | ";
             }
         }
