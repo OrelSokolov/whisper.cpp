@@ -12,6 +12,8 @@
 /CMakeSettings.json
 /talk-llama.dSYM/
 
+_deps/
+
 build/
 build-*/
 build_*/
