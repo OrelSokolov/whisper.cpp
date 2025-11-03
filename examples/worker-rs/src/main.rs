@@ -93,7 +93,6 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", WHISPER_WORKER_PORT))
         .await
         .context("Failed to bind socket")?;
-    
     info!("WebSocket server listening on port {}", WHISPER_WORKER_PORT);
     info!("Ready to accept connections (one at a time)");
     

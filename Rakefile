@@ -71,6 +71,54 @@ namespace :build do
       puts "Build directory #{BUILD_DIR}/ does not exist"
     end
   end
+
+  desc "Build DEB package for amd64 architecture"
+  task :deb do
+    unless File.directory?('debian')
+      puts "Error: debian/ directory not found"
+      puts "  Make sure you're running this from the whisper.cpp root directory"
+      exit 1
+    end
+
+    unless system('which debuild > /dev/null 2>&1')
+      puts "Error: debuild not found"
+      puts "  Please install devscripts package:"
+      puts "    sudo apt-get install devscripts debhelper"
+      exit 1
+    end
+
+    puts "Building DEB package..."
+    puts "  This may take a while as it builds both CMake and Rust components..."
+    
+    build_script = 'build-deb.sh'
+    if File.exist?(build_script) && File.executable?(build_script)
+      unless system("./#{build_script}")
+        puts "\n✗ Build failed"
+        exit 1
+      end
+    else
+      # Fallback to direct debuild call
+      puts "  Using direct debuild..."
+      unless system('debuild -b -us -uc')
+        puts "\n✗ Build failed"
+        exit 1
+      end
+    end
+
+    # Find and display the created .deb file
+    deb_files = Dir.glob('../whisper-cpp_*.deb')
+    if deb_files.any?
+      puts "\n✓ Build complete! Package files:"
+      deb_files.each do |deb|
+        size = File.size(deb)
+        size_mb = (size / 1024.0 / 1024.0).round(2)
+        puts "  #{File.basename(deb)} (#{size_mb} MB)"
+      end
+      puts "\n  Install with: sudo dpkg -i ../whisper-cpp_*.deb"
+    else
+      puts "\n⚠ Build completed but .deb file not found in parent directory"
+    end
+  end
 end
 
 namespace :configure do
@@ -164,6 +212,7 @@ task :help do
       rake build:rust:worker   - Build whisper-worker-rs executable (Rust)
       rake build:cli            - Build whisper-cli executable
       rake build:all            - Build all examples and targets
+      rake build:deb            - Build DEB package for amd64 (includes all binaries)
       rake build:clean          - Clean build directory
       rake build:configure      - Configure CMake build system
 
@@ -188,6 +237,7 @@ task :help do
       rake configure:nvidia && rake build:cli
       rake build:rust:worker
       rake build:all
+      rake build:deb
       rake spec:punctuation
 
   HELP

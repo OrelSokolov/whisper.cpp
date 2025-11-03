@@ -1,0 +1,41 @@
+Source: whisper-cpp
+Section: sound
+Priority: optional
+Maintainer: Whisper.cpp Maintainers <whisper@example.com>
+Build-Depends: debhelper (>= 13),
+               cmake (>= 3.5),
+               build-essential,
+               pkg-config,
+               libssl-dev,
+               libvulkan-dev,
+               glslang-tools,
+               rustc (>= 1.70),
+               cargo,
+               git,
+               patchelf
+Standards-Version: 4.6.0
+Homepage: https://github.com/ggerganov/whisper.cpp
+Rules-Requires-Root: no
+
+Package: whisper-cpp
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         libssl3 | libssl1.1 | libssl1.0.2,
+         libvulkan1,
+         libc6 (>= 2.17)
+Description: High-performance automatic speech recognition (ASR) library and tools
+ whisper.cpp is a high-performance inference of OpenAI's Whisper automatic
+ speech recognition (ASR) model.
+ .
+ This package includes:
+  - libwhisper shared library
+  - whisper-cli command-line tool
+  - whisper-server HTTP server
+  - whisper-worker WebSocket worker (C++ and Rust versions)
+  - whisper-bench benchmarking tool
+  - whisper-stream streaming tool
+  - whisper-command command tool
+  - whisper-system-info system information tool
+  - whisper-vad-speech-segments VAD tool
+  - quantize quantization tool
+

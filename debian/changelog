@@ -1,0 +1,8 @@
+whisper-cpp (1.8.2-1) unstable; urgency=medium
+
+  * Initial DEB package for whisper.cpp
+  * Includes all binaries including Rust worker version
+  * Built for amd64 architecture
+
+ -- Whisper.cpp Maintainers <whisper@example.com>  Mon, 01 Jan 2024 12:00:00 +0000
+

@@ -1,0 +1,59 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_CFLAGS_MAINT_APPEND = -Wall -pedantic
+export DEB_CXXFLAGS_MAINT_APPEND = -Wall -pedantic
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+CMAKE_FLAGS := -DCMAKE_BUILD_TYPE=Release \
+               -DBUILD_SHARED_LIBS=ON \
+               -DWHISPER_BUILD_EXAMPLES=ON \
+               -DWHISPER_BUILD_SERVER=ON \
+               -DCMAKE_INSTALL_PREFIX=/usr \
+               -DGGML_VULKAN=ON
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	# Configure CMake build
+	mkdir -p build
+	cd build && cmake .. $(CMAKE_FLAGS)
+
+override_dh_auto_build:
+	# Build CMake project first
+	cd build && $(MAKE) -j$$(nproc)
+	# Build Rust worker (needs CMake libraries to exist)
+	# Set library paths so Rust can find whisper and ggml libraries
+	export LD_LIBRARY_PATH=$(CURDIR)/build/src:$(CURDIR)/build/ggml/src:$$LD_LIBRARY_PATH && \
+	cd examples/worker-rs && CARGO_BUILD_FLAGS="--release" cargo build --release
+
+override_dh_auto_test:
+	# Optionally run tests if needed
+	# cd build && ctest
+
+override_dh_auto_install:
+	# Install CMake targets
+	cd build && $(MAKE) DESTDIR=$(CURDIR)/debian/whisper-cpp install
+	# Install Rust binary
+	install -D -m755 examples/worker-rs/target/release/whisper-worker-rs \
+		$(CURDIR)/debian/whisper-cpp/usr/bin/whisper-worker-rs
+	# Update RPATH for Rust binary to use system library paths
+	# This ensures the binary finds libwhisper.so and libggml.so
+	# Include both /usr/lib and /lib paths for maximum compatibility
+	if command -v patchelf >/dev/null 2>&1; then \
+		patchelf --set-rpath '/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib:/lib' \
+			$(CURDIR)/debian/whisper-cpp/usr/bin/whisper-worker-rs 2>/dev/null || true; \
+	fi
+
+override_dh_strip:
+	# Exclude Rust binary from stripping - stripping breaks Tokio runtime
+	dh_strip --exclude=quantize --exclude=whisper-worker-rs
+
+override_dh_shlibdeps:
+	dh_shlibdeps
+
+override_dh_fixperms:
+	dh_fixperms
+

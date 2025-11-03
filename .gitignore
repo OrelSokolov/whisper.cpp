@@ -66,3 +66,23 @@ cmake-build-debug/
 local.properties
 .log
 .exe
+
+# DEB package build artifacts
+debian/whisper-cpp/
+debian/.debhelper/
+debian/*.debhelper.log
+debian/*.substvars
+debian/debhelper-build-stamp
+debian/files
+debian/MISSING_FILES.md
+debian/SUMMARY.txt
+debian/CMAKE_FILES_EXPLANATION.md
+debian/source/.tmp/
+
+# DEB package output files (in parent directory)
+../whisper-cpp_*.deb
+../whisper-cpp_*.dsc
+../whisper-cpp_*.tar.*
+../whisper-cpp_*.changes
+../whisper-cpp_*.build
+../whisper-cpp_*.buildinfo

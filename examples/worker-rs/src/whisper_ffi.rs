@@ -239,8 +239,9 @@ impl WhisperContextWrapper {
         unsafe {
             let device_cstr = CString::new(device).map_err(|e| format!("Invalid device: {}", e))?;
             let result = whisper_ctx_init_openvino_encoder(self.ctx, ptr::null(), device_cstr.as_ptr(), ptr::null());
+            // Non-fatal: OpenVINO encoder initialization is optional
             if result != 0 {
-                return Err("Failed to initialize OpenVINO encoder".to_string());
+                return Ok(()); // Continue even if OpenVINO init fails
             }
             Ok(())
         }
