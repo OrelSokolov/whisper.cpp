@@ -1,4 +1,16 @@
 cmake_minimum_required(VERSION 3.5) # for add_link_options and implicit target directories.
+
+# Prevent in-source builds
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR
+        "In-source builds are not allowed. Please create a separate build directory:\n"
+        "  mkdir build\n"
+        "  cd build\n"
+        "  cmake ..\n"
+        "  make\n"
+    )
+endif()
+
 project("whisper.cpp" C CXX)
 project("whisper.cpp" VERSION 1.8.2)
 include(CheckIncludeFileCXX)
