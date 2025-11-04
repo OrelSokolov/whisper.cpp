@@ -4504,6 +4504,19 @@ static void ggml_vk_print_gpu_info(size_t idx) {
     vk::PhysicalDeviceSubgroupProperties subgroup_props;
     vk::PhysicalDeviceDriverProperties driver_props;
     vk::PhysicalDeviceShaderIntegerDotProductPropertiesKHR shader_integer_dot_product_props;
+    vk::PhysicalDeviceShaderCoreProperties2AMD amd_shader_core_properties2_props;
+    vk::PhysicalDeviceShaderSMBuiltinsPropertiesNV sm_props;
+    
+    bool amd_shader_core_properties2_support = false;
+    bool sm_builtins_support = false;
+    for (auto properties : ext_props) {
+        if (strcmp("VK_AMD_shader_core_properties2", properties.extensionName) == 0) {
+            amd_shader_core_properties2_support = true;
+        } else if (strcmp("VK_NV_shader_sm_builtins", properties.extensionName) == 0) {
+            sm_builtins_support = true;
+        }
+    }
+    
     props2.pNext = &props3;
     props3.pNext = &subgroup_props;
     subgroup_props.pNext = &driver_props;
@@ -4515,8 +4528,24 @@ static void ggml_vk_print_gpu_info(size_t idx) {
         last_struct->pNext = (VkBaseOutStructure *)&shader_integer_dot_product_props;
         last_struct = (VkBaseOutStructure *)&shader_integer_dot_product_props;
     }
+    if (amd_shader_core_properties2_support) {
+        last_struct->pNext = (VkBaseOutStructure *)&amd_shader_core_properties2_props;
+        last_struct = (VkBaseOutStructure *)&amd_shader_core_properties2_props;
+    }
+    if (sm_builtins_support) {
+        last_struct->pNext = (VkBaseOutStructure *)&sm_props;
+        last_struct = (VkBaseOutStructure *)&sm_props;
+    }
 
     physical_device.getProperties2(&props2);
+    
+    // Get shader core count for AMD/NVIDIA
+    uint32_t shader_core_count = 0;
+    if (sm_builtins_support) {
+        shader_core_count = sm_props.shaderSMCount;
+    } else if (amd_shader_core_properties2_support) {
+        shader_core_count = amd_shader_core_properties2_props.activeComputeUnitCount;
+    }
 
     VkPhysicalDeviceFeatures2 device_features2;
     device_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -4590,9 +4619,26 @@ static void ggml_vk_print_gpu_info(size_t idx) {
     std::string matrix_cores = coopmat2_support ? "NV_coopmat2" : coopmat_support ? "KHR_coopmat" : "none";
 
     std::string device_name = props2.properties.deviceName.data();
-    GGML_LOG_DEBUG("ggml_vulkan: %zu = %s (%s) | uma: %d | fp16: %d | bf16: %d | warp size: %zu | shared memory: %d | int dot: %d | matrix cores: %s\n",
-              idx, device_name.c_str(), driver_props.driverName.data(), uma, fp16, bf16, subgroup_size,
-              props2.properties.limits.maxComputeSharedMemorySize, integer_dot_product, matrix_cores.c_str());
+    // Log important performance characteristics at INFO level
+    GGML_LOG_INFO("ggml_vulkan: Device %zu: %s (driver: %s)\n", idx, device_name.c_str(), driver_props.driverName.data());
+    GGML_LOG_INFO("ggml_vulkan:   Type: %s | UMA: %d | FP16: %d | BF16: %d | Subgroup size: %zu\n",
+              props2.properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu ? "Discrete GPU" :
+              props2.properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu ? "Integrated GPU" : "Other",
+              uma, fp16, bf16, subgroup_size);
+    GGML_LOG_INFO("ggml_vulkan:   Shared memory: %d KB | Max workgroup invocations: %d | Integer dot product: %d | Matrix cores: %s\n",
+              props2.properties.limits.maxComputeSharedMemorySize / 1024,
+              props2.properties.limits.maxComputeWorkGroupInvocations,
+              integer_dot_product, matrix_cores.c_str());
+    GGML_LOG_INFO("ggml_vulkan:   Max compute workgroup size: [%d, %d, %d] | Max push constants: %d bytes\n",
+              props2.properties.limits.maxComputeWorkGroupSize[0],
+              props2.properties.limits.maxComputeWorkGroupSize[1],
+              props2.properties.limits.maxComputeWorkGroupSize[2],
+              props2.properties.limits.maxPushConstantsSize);
+    if (shader_core_count > 0) {
+        GGML_LOG_INFO("ggml_vulkan:   Shader cores (CUs/SMs): %u (THIS IS THE KEY PERFORMANCE METRIC!)\n", shader_core_count);
+    } else {
+        GGML_LOG_INFO("ggml_vulkan:   Shader cores: Unknown (AMD/NVIDIA extensions not available)\n");
+    }
 
     if (props2.properties.deviceType == vk::PhysicalDeviceType::eCpu) {
         GGML_LOG_DEBUG("ggml_vulkan: Warning: Device type is CPU. This is probably not the device you want.\n");
@@ -4714,7 +4760,8 @@ static void ggml_vk_instance_init() {
             return;
         }
 
-        // Default to using all dedicated GPUs
+        // Default to using all GPUs, prioritizing discrete GPUs over integrated GPUs
+        // First pass: collect discrete GPUs
         for (size_t i = 0; i < devices.size(); i++) {
             vk::PhysicalDeviceProperties2 new_props;
             vk::PhysicalDeviceDriverProperties new_driver;
@@ -4723,7 +4770,85 @@ static void ggml_vk_instance_init() {
             new_driver.pNext = &new_id;
             devices[i].getProperties2(&new_props);
 
-            if ((new_props.properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu || new_props.properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu) && ggml_vk_device_is_supported(devices[i])) {
+            if (new_props.properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu && ggml_vk_device_is_supported(devices[i])) {
+                // Check if there are two physical devices corresponding to the same GPU
+                auto old_device = std::find_if(
+                    vk_instance.device_indices.begin(),
+                    vk_instance.device_indices.end(),
+                    [&devices, &new_id](const size_t k){
+                        vk::PhysicalDeviceProperties2 old_props;
+                        vk::PhysicalDeviceIDProperties old_id;
+                        old_props.pNext = &old_id;
+                        devices[k].getProperties2(&old_props);
+                        return std::equal(std::begin(old_id.deviceUUID), std::end(old_id.deviceUUID), std::begin(new_id.deviceUUID));
+                    }
+                );
+                if (old_device == vk_instance.device_indices.end()) {
+                    vk_instance.device_indices.push_back(i);
+                } else {
+                    // There can be two physical devices corresponding to the same GPU if there are 2 different drivers
+                    // This can cause error when splitting layers aross the devices, need to keep only 1
+                    VK_LOG_DEBUG("Device " << i << " and device " << *old_device << " have the same deviceUUID");
+
+                    vk::PhysicalDeviceProperties2 old_props;
+                    vk::PhysicalDeviceDriverProperties old_driver;
+                    old_props.pNext = &old_driver;
+                    devices[*old_device].getProperties2(&old_props);
+
+                    std::map<vk::DriverId, int> driver_priorities {};
+                    int old_priority = std::numeric_limits<int>::max();
+                    int new_priority = std::numeric_limits<int>::max();
+
+                    // Check https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkDriverId.html for the list of driver id
+                    // Smaller number -> higher priority
+                    switch (old_props.properties.vendorID) {
+                        case VK_VENDOR_ID_AMD:
+                            driver_priorities[vk::DriverId::eMesaRadv] = 1;
+                            driver_priorities[vk::DriverId::eAmdOpenSource] = 2;
+                            driver_priorities[vk::DriverId::eAmdProprietary] = 3;
+                            break;
+                        case VK_VENDOR_ID_INTEL:
+                            driver_priorities[vk::DriverId::eIntelOpenSourceMESA] = 1;
+                            driver_priorities[vk::DriverId::eIntelProprietaryWindows] = 2;
+                            break;
+                        case VK_VENDOR_ID_NVIDIA:
+                            driver_priorities[vk::DriverId::eNvidiaProprietary] = 1;
+#if defined(VK_API_VERSION_1_3) && VK_HEADER_VERSION >= 235
+                            driver_priorities[vk::DriverId::eMesaNvk] = 2;
+#endif
+                            break;
+                    }
+
+                    if (driver_priorities.count(old_driver.driverID)) {
+                        old_priority = driver_priorities[old_driver.driverID];
+                    }
+                    if (driver_priorities.count(new_driver.driverID)) {
+                        new_priority = driver_priorities[new_driver.driverID];
+                    }
+
+                    if (new_priority < old_priority) {
+                        auto r = std::remove(vk_instance.device_indices.begin(), vk_instance.device_indices.end(), *old_device);
+                        vk_instance.device_indices.erase(r, vk_instance.device_indices.end());
+                        vk_instance.device_indices.push_back(i);
+
+                        VK_LOG_DEBUG("Prioritize device " << i << " driver " << new_driver.driverName << " over device " << *old_device << " driver " << old_driver.driverName);
+                    }
+                    else {
+                        VK_LOG_DEBUG("Prioritize device " << *old_device << " driver " << old_driver.driverName << " over device " << i << " driver " << new_driver.driverName << std::endl);
+                    }
+                }
+            }
+        }
+        // Second pass: collect integrated GPUs (only if no discrete GPUs were found, or to add as additional devices)
+        for (size_t i = 0; i < devices.size(); i++) {
+            vk::PhysicalDeviceProperties2 new_props;
+            vk::PhysicalDeviceDriverProperties new_driver;
+            vk::PhysicalDeviceIDProperties new_id;
+            new_props.pNext = &new_driver;
+            new_driver.pNext = &new_id;
+            devices[i].getProperties2(&new_props);
+
+            if (new_props.properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu && ggml_vk_device_is_supported(devices[i])) {
                 // Check if there are two physical devices corresponding to the same GPU
                 auto old_device = std::find_if(
                     vk_instance.device_indices.begin(),
@@ -4809,10 +4934,18 @@ static void ggml_vk_instance_init() {
             return;
         }
     }
-    GGML_LOG_DEBUG("ggml_vulkan: Found %zu Vulkan devices:\n", vk_instance.device_indices.size());
+    GGML_LOG_INFO("ggml_vulkan: Found %zu Vulkan devices (prioritized order):\n", vk_instance.device_indices.size());
 
     for (size_t i = 0; i < vk_instance.device_indices.size(); i++) {
-        vk::PhysicalDevice vkdev = devices[vk_instance.device_indices[i]];
+        size_t orig_idx = vk_instance.device_indices[i];
+        vk::PhysicalDevice vkdev = devices[orig_idx];
+        vk::PhysicalDeviceProperties2 props2;
+        vkdev.getProperties2(&props2);
+        const char* device_type = props2.properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu ? "DISCRETE" :
+                                  props2.properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu ? "INTEGRATED" : "OTHER";
+        GGML_LOG_INFO("ggml_vulkan:   Backend device %zu -> Physical device %zu (%s): %s\n", 
+                  i, orig_idx, device_type, props2.properties.deviceName.data());
+        
         std::vector<vk::ExtensionProperties> extensionprops = vkdev.enumerateDeviceExtensionProperties();
 
         bool membudget_supported = false;
@@ -4837,6 +4970,14 @@ static void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     ctx->name = GGML_VK_NAME + std::to_string(idx);
 
     ctx->device = ggml_vk_get_device(idx);
+    
+    // Log the actual device name and performance characteristics being used
+    std::string device_name = ctx->device->properties.deviceName.data();
+    GGML_LOG_INFO("ggml_vulkan: Initializing backend %s on device: %s\n", ctx->name.c_str(), device_name.c_str());
+    if (ctx->device->shader_core_count > 0) {
+        GGML_LOG_INFO("ggml_vulkan:   Shader cores (CUs): %u | Subgroup size: %u\n", 
+                  ctx->device->shader_core_count, ctx->device->subgroup_size);
+    }
 
     ctx->semaphore_idx = 0;
     ctx->event_idx = 0;

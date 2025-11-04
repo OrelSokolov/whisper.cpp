@@ -1305,7 +1305,8 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params & pa
             const char * dev_name = ggml_backend_dev_name(dev_cur);
             WHISPER_LOG_INFO("%s: device %zu: %s (type: %d)\n", __func__, i, dev_name, dev_type);
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
-                WHISPER_LOG_INFO("%s: found GPU device %zu: %s (type: %d, cnt: %d)\n", __func__, i, dev_name, dev_type, cnt);
+                const char * dev_description = ggml_backend_dev_description(dev_cur);
+                WHISPER_LOG_INFO("%s: found GPU device %zu: %s (type: %d, cnt: %d, description: %s)\n", __func__, i, dev_name, dev_type, cnt, dev_description ? dev_description : "unknown");
                 if (cnt == params.gpu_device) {
                     dev = dev_cur;
                 }
@@ -1322,7 +1323,8 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params & pa
         return nullptr;
     }
 
-    WHISPER_LOG_INFO("%s: using %s backend\n", __func__, ggml_backend_dev_name(dev));
+    const char * dev_description = ggml_backend_dev_description(dev);
+    WHISPER_LOG_INFO("%s: using %s backend (device: %s)\n", __func__, ggml_backend_dev_name(dev), dev_description ? dev_description : "unknown");
     ggml_backend_t result = ggml_backend_dev_init(dev, nullptr);
     if (!result) {
         WHISPER_LOG_ERROR("%s: failed to initialize %s backend\n", __func__, ggml_backend_dev_name(dev));
