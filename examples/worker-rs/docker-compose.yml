@@ -1,0 +1,50 @@
+services:
+  worker-rs:
+    build:
+      context: ../..  # Корень проекта whisper.cpp
+      dockerfile: examples/worker-rs/Dockerfile
+      args:
+        # Передаем GID группы render с хоста (можно определить командой: getent group render | cut -d: -f3)
+        RENDER_GID: ${RENDER_GID:-991}
+    container_name: whisper-worker-rs
+    ports:
+      - "8765:8765"
+    volumes:
+      # Монтирование моделей
+      - ../../models:/app/models:ro
+      # Монтирование устройств GPU для Vulkan (требуется для доступа к GPU)
+      - /dev/dri:/dev/dri
+      # Монтирование ICD файлов Vulkan с хоста для драйверов AMD
+      - /usr/share/vulkan:/usr/share/vulkan:ro
+      - /usr/share/drirc.d:/usr/share/drirc.d:ro
+      # Монтирование библиотек драйверов Mesa
+      - /usr/lib/x86_64-linux-gnu/dri:/usr/lib/x86_64-linux-gnu/dri:ro
+    devices:
+      # Проброс GPU устройств для Vulkan
+      - /dev/dri:/dev/dri
+    # Добавляем группу render для доступа к GPU без privileged режима
+    # GID берется из переменной окружения RENDER_GID или использует значение по умолчанию
+    # Для определения GID на хосте: getent group render | cut -d: -f3
+    group_add:
+      - "${RENDER_GID:-991}"  # GID группы render на хосте (по умолчанию 991)
+    environment:
+      # Настройки Vulkan (универсальные для AMD/Intel/NVIDIA)
+      # Закомментируйте следующую строку, чтобы автоопределение работало для всех GPU
+      # - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+      # Для автоматического обнаружения всех GPU (рекомендуется):
+      - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/
+      - VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d
+      # Для Mesa drivers (AMD, Intel)
+      - LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
+      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+      # Опциональные настройки worker-rs
+      - RUST_LOG=info
+    # Права для доступа к GPU
+    privileged: false
+    # Альтернатива: использовать runtime с GPU поддержкой
+    # runtime: nvidia  # для NVIDIA (если используется nvidia-container-toolkit)
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    #   - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    restart: unless-stopped
+

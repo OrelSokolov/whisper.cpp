@@ -105,18 +105,31 @@ namespace :build do
       end
     end
 
-    # Find and display the created .deb file
+    # Find .deb file in parent directory and move to project root
     deb_files = Dir.glob('../whisper-cpp_*.deb')
     if deb_files.any?
-      puts "\n✓ Build complete! Package files:"
+      puts "\n✓ Build complete! Moving package to project root..."
       deb_files.each do |deb|
+        target = File.basename(deb)
+        FileUtils.mv(deb, target, force: true)
+        size = File.size(target)
+        size_mb = (size / 1024.0 / 1024.0).round(2)
+        puts "  #{target} (#{size_mb} MB)"
+      end
+      puts "\n  Package location: ./#{File.basename(deb_files.first)}"
+      puts "  Install with: sudo dpkg -i whisper-cpp_*.deb"
+    elsif Dir.glob('whisper-cpp_*.deb').any?
+      # Package already in project root (maybe from previous build)
+      puts "\n✓ DEB package already in project root:"
+      Dir.glob('whisper-cpp_*.deb').each do |deb|
         size = File.size(deb)
         size_mb = (size / 1024.0 / 1024.0).round(2)
-        puts "  #{File.basename(deb)} (#{size_mb} MB)"
+        puts "  #{deb} (#{size_mb} MB)"
       end
-      puts "\n  Install with: sudo dpkg -i ../whisper-cpp_*.deb"
+      puts "\n  Install with: sudo dpkg -i whisper-cpp_*.deb"
     else
-      puts "\n⚠ Build completed but .deb file not found in parent directory"
+      puts "\n⚠ Build may have failed - .deb package not found"
+      puts "  Check the build output above for errors"
     end
   end
 end

@@ -26,6 +26,15 @@ echo "Building package..."
 debuild -b -us -uc
 
 echo ""
-echo "Build complete! Package files are in parent directory:"
-ls -lh ../whisper-cpp_*.deb 2>/dev/null || echo "No .deb file found"
+echo "Build complete! Moving package to project root..."
+if ls ../whisper-cpp_*.deb 1> /dev/null 2>&1; then
+    mv -v ../whisper-cpp_*.deb ./ 2>/dev/null || true
+    echo ""
+    echo "Package files in project root:"
+    ls -lh whisper-cpp_*.deb 2>/dev/null
+    echo ""
+    echo "Install with: sudo dpkg -i whisper-cpp_*.deb"
+else
+    echo "No .deb file found"
+fi
 
