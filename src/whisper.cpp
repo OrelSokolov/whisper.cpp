@@ -2121,26 +2121,33 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
 
         // self-attention
         {
+            // OPTIMIZATION: Create Q, K, V operations simultaneously to enable parallel execution
+            // These operations are independent and can be executed in parallel by the scheduler
             struct ggml_tensor * Qcur = ggml_mul_mat(ctx0,
                     layer.attn_q_w,
                     cur);
-
-            Qcur = ggml_add(ctx0, Qcur, layer.attn_q_b);
-
-            //Qcur = ggml_scale(ctx0, Qcur, pow(float(n_state_head), -0.25));
 
             // note: no bias for Key
             struct ggml_tensor * Kcur = ggml_mul_mat(ctx0,
                     layer.attn_k_w,
                     cur);
 
-            //Kcur = ggml_scale(ctx0, Kcur, pow(float(n_state_head), -0.25));
-
             struct ggml_tensor * Vcur = ggml_mul_mat(ctx0,
                     layer.attn_v_w,
                     cur);
 
+            // Add Q, K, V to graph before applying bias to allow scheduler to parallelize
+            // The scheduler will see these as independent operations and can execute them concurrently
+            ggml_build_forward_expand(gf, Qcur);
+            ggml_build_forward_expand(gf, Kcur);
+            ggml_build_forward_expand(gf, Vcur);
+
+            // Now apply bias operations (they depend on Q, K, V)
+            Qcur = ggml_add(ctx0, Qcur, layer.attn_q_b);
             Vcur = ggml_add(ctx0, Vcur, layer.attn_v_b);
+
+            //Qcur = ggml_scale(ctx0, Qcur, pow(float(n_state_head), -0.25));
+            //Kcur = ggml_scale(ctx0, Kcur, pow(float(n_state_head), -0.25));
 
             // ------
 
