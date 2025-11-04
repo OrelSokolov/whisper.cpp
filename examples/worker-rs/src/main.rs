@@ -50,6 +50,10 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+    
+    /// Port to listen on
+    #[arg(long, default_value_t = WHISPER_WORKER_PORT)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -89,11 +93,17 @@ async fn main() -> Result<()> {
     let ctx = Arc::new(ctx);
     let params = Arc::new(params);
     
+    // Get port from environment variable or command line argument
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(args.port);
+    
     // Create TCP listener
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", WHISPER_WORKER_PORT))
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .context("Failed to bind socket")?;
-    info!("WebSocket server listening on port {}", WHISPER_WORKER_PORT);
+    info!("WebSocket server listening on port {}", port);
     info!("Ready to accept connections (one at a time)");
     
     // Accept connections (one at a time)

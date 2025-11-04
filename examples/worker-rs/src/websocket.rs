@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::{info, error, warn, debug};
+use log::{info, error, warn};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::net::TcpStream;
@@ -171,6 +171,9 @@ async fn process_audio_websocket_raw(
         language = "auto".to_string();
     }
     
+    // Reset timings before processing to get accurate per-request statistics
+    ctx.reset_timings();
+    
     // Capture start time for benchmark and ETA
     let t_start_process_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -250,13 +253,14 @@ extern "C" fn segment_callback(
     n_new: c_int,
     user_data: *mut std::os::raw::c_void,
 ) {
+    use log::info;
     unsafe {
         let callback_data = &*(user_data as *const CallbackData);
         
         let n_segments = crate::whisper_ffi::whisper_full_n_segments(ctx);
         let s0 = n_segments - n_new;
         
-        debug!("CALLBACK: n_new={}, total_segments={}, sending segments {} to {}", 
+        info!("CALLBACK: n_new={}, total_segments={}, sending segments {} to {}", 
               n_new, n_segments, s0, n_segments - 1);
         
         // Send new segments through channel
@@ -280,7 +284,7 @@ extern "C" fn segment_callback(
                         t1,
                     };
                     
-                    debug!("CALLBACK: sending segment {} through channel", i);
+                    info!("CALLBACK: sending segment {} through channel", i);
                     // Send through channel (ignore error if receiver dropped)
                     let _ = sender.send(segment);
                 }
@@ -347,7 +351,7 @@ async fn process_audio_with_whisper_raw(
         let mut count = 0;
         while let Some(segment) = rx.recv().await {
             count += 1;
-            debug!("Streaming segment {}: {} chars", segment.index, segment.text.len());
+            info!("Streaming segment {}: {} chars", segment.index, segment.text.len());
             
             let mut stream_guard = stream_clone.lock().await;
             if let Err(e) = send_segment_data(&mut *stream_guard, segment, &params_clone, audio_duration_s, t_start_process_us).await {
@@ -355,15 +359,20 @@ async fn process_audio_with_whisper_raw(
             }
             drop(stream_guard); // Release lock immediately
         }
-        debug!("Segment streaming complete, {} segments sent", count);
+        info!("Segment streaming complete, {} segments sent", count);
     });
     
     // Prepare data for spawn_blocking
     let ctx_clone = ctx.clone();
     let pcmf32_vec = pcmf32.to_vec();
     
-    // Create "auto" language string for detection
-    let lang_auto = std::ffi::CString::new("auto").unwrap();
+    // Use language from params, or "auto" for detection
+    let lang_str = if params.language.is_empty() || params.language == "auto" {
+        "auto".to_string()
+    } else {
+        params.language.clone()
+    };
+    let lang_cstring = std::ffi::CString::new(lang_str.as_str()).unwrap();
     
     // Run whisper_full_parallel in blocking thread so callback can send data while processing
     let processing_handle = tokio::task::spawn_blocking(move || {
@@ -386,8 +395,8 @@ async fn process_audio_with_whisper_raw(
             wparams.single_segment = false;
             wparams.translate = false;
             wparams.no_timestamps = no_timestamps;
-            wparams.language = lang_auto.as_ptr(); // Set to "auto" - whisper will auto-detect
-            wparams.detect_language = false; // False when language is "auto" (C++ default)
+            wparams.language = lang_cstring.as_ptr(); // Use specified language or "auto"
+            wparams.detect_language = false; // False when language is set (C++ default)
             wparams.n_threads = n_threads; // Number of threads for processing
             wparams.offset_ms = 0;
             wparams.duration_ms = 0;
@@ -414,8 +423,9 @@ async fn process_audio_with_whisper_raw(
             info!("Callback set: callback={:?}, user_data={:?}", 
                   wparams.new_segment_callback as *const (), 
                   wparams.new_segment_callback_user_data);
-            info!("Parameters: n_threads={}, detect_language={}, no_context={}, print_realtime={}", 
-                  wparams.n_threads, wparams.detect_language, wparams.no_context, wparams.print_realtime);
+            let lang_str_debug = std::ffi::CStr::from_ptr(wparams.language).to_string_lossy();
+            info!("Parameters: n_threads={}, language='{}', detect_language={}, no_context={}, print_realtime={}, single_segment={}", 
+                  wparams.n_threads, lang_str_debug, wparams.detect_language, wparams.no_context, wparams.print_realtime, wparams.single_segment);
             info!("Calling whisper_full_parallel with streaming callback in blocking thread...");
             let result = crate::whisper_ffi::whisper_full_parallel(
                 ctx_clone.ctx(),
@@ -453,7 +463,7 @@ async fn process_audio_with_whisper_raw(
         return Err(anyhow::anyhow!("Failed to process audio (return code: {})", result));
     }
     
-    debug!("All segments sent successfully");
+    info!("All segments sent successfully");
     
     // Send completion message (like C++ version)
     let complete_msg = CompleteMessage {
@@ -527,12 +537,12 @@ async fn send_segment_data(
     }
     
     let json = serde_json::to_string(&segment_msg)?;
-    debug!("Sending segment {} JSON: {}", segment.index, json);
+    info!("Sending segment {} JSON: {}", segment.index, json);
     if let Err(e) = write_ws_frame(stream, json.as_bytes(), WS_OPCODE_TEXT).await {
         error!("Failed to write WebSocket frame for segment {}: {}", segment.index, e);
         return Err(e);
     }
-    debug!("Segment {} sent successfully", segment.index);
+    info!("Segment {} sent successfully", segment.index);
     
     Ok(())
 }
@@ -594,12 +604,12 @@ async fn send_segment_raw(
     }
     
     let json = serde_json::to_string(&segment_msg)?;
-    debug!("Sending segment {} JSON: {}", i, json);
+    info!("Sending segment {} JSON: {}", i, json);
     if let Err(e) = write_ws_frame(stream, json.as_bytes(), WS_OPCODE_TEXT).await {
         error!("Failed to write WebSocket frame for segment {}: {}", i, e);
         return Err(e);
     }
-    debug!("Segment {} sent successfully", i);
+    info!("Segment {} sent successfully", i);
     
     Ok(())
 }

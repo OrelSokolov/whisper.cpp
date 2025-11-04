@@ -85,6 +85,10 @@ begin
   processing_complete = false
   mutex = Mutex.new
   
+  # Переменные для измерения RTT
+  start_time = nil
+  end_time = nil
+  
   # Подключение к WebSocket серверу
   ws = WebSocket::Client::Simple.connect(ws_url)
   
@@ -93,8 +97,11 @@ begin
     puts "✓ Соединение установлено"
     puts "Отправка аудио файла..."
     
-    # Читаем файл и отправляем как binary данные
+    # Читаем файл
     audio_data = File.binread(options[:file])
+    
+    # Фиксируем время начала отправки файла для RTT (перед фактической отправкой)
+    mutex.synchronize { start_time = Time.now }
     
     # websocket-client-simple может не поддерживать прямой binary send
     # Попробуем отправить через send с опцией binary
@@ -153,9 +160,26 @@ begin
         puts "Статус: #{json['message']}"
         
       when 'complete'
+        # Фиксируем время завершения для RTT
+        mutex.synchronize do
+          end_time = Time.now
+          processing_complete = true
+        end
+        
+        # Вычисляем и выводим RTT
+        rtt_seconds = mutex.synchronize do
+          if start_time && end_time
+            (end_time - start_time).round(3)
+          else
+            nil
+          end
+        end
+        
         puts "-" * 50
         puts "✓ Обработка завершена"
-        mutex.synchronize { processing_complete = true }
+        if rtt_seconds
+          puts "RTT: #{rtt_seconds} секунд (от начала отправки файла до завершения расшифровки)"
+        end
         # Не закрываем сразу, дадим серверу закрыть соединение
         
       when 'error'

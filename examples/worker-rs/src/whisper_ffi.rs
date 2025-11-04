@@ -145,6 +145,7 @@ extern "C" {
     pub fn whisper_full_get_segment_t1(ctx: *mut WhisperContext, i_segment: c_int) -> i64;
     pub fn whisper_is_multilingual(ctx: *mut WhisperContext) -> c_int;
     pub fn whisper_print_timings(ctx: *mut WhisperContext);
+    pub fn whisper_reset_timings(ctx: *mut WhisperContext);
     pub fn whisper_ctx_init_openvino_encoder(
         ctx: *mut WhisperContext,
         model_path: *const c_char,
@@ -288,6 +289,12 @@ impl WhisperContextWrapper {
     pub fn print_timings(&self) {
         unsafe {
             whisper_print_timings(self.ctx);
+        }
+    }
+    
+    pub fn reset_timings(&self) {
+        unsafe {
+            whisper_reset_timings(self.ctx);
         }
     }
 }
