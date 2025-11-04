@@ -106,6 +106,10 @@ async fn main() -> Result<()> {
     info!("WebSocket server listening on port {}", port);
     info!("Ready to accept connections (one at a time)");
     
+    // Use a SINGLE mutex shared across ALL connections to ensure whisper context
+    // is never used concurrently (whisper context is NOT thread-safe)
+    let context_mutex = Arc::new(Mutex::new(()));
+    
     // Accept connections (one at a time)
     loop {
         match listener.accept().await {
@@ -114,16 +118,18 @@ async fn main() -> Result<()> {
                 
                 let ctx_clone = Arc::clone(&ctx);
                 let params_clone = Arc::clone(&params);
-                
-                // Use a mutex to ensure only one connection processes at a time
-                let connection_mutex = Arc::new(Mutex::new(()));
-                let mutex_clone = Arc::clone(&connection_mutex);
+                let mutex_clone = Arc::clone(&context_mutex);
                 
                 tokio::spawn(async move {
+                    // Lock the mutex to ensure only one whisper processing happens at a time
+                    // This mutex is shared across ALL connections to prevent concurrent access
+                    // to the whisper context, which is NOT thread-safe
                     let _guard = mutex_clone.lock().await;
+                    info!("Processing connection from {} (whisper context locked)", addr);
                     if let Err(e) = websocket::handle_websocket_connection(stream, ctx_clone, params_clone).await {
                         error!("WebSocket connection error: {}", e);
                     }
+                    info!("Connection from {} completed (whisper context unlocked)", addr);
                 });
             }
             Err(e) => {

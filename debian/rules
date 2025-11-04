@@ -26,8 +26,11 @@ override_dh_auto_build:
 	cd build && $(MAKE) -j$$(nproc)
 	# Build Rust worker (needs CMake libraries to exist)
 	# Set library paths so Rust can find whisper and ggml libraries
+	# Set DEBIAN_BUILD to skip local rpath in build.rs, and RUSTFLAGS for system rpath
 	export LD_LIBRARY_PATH=$(CURDIR)/build/src:$(CURDIR)/build/ggml/src:$$LD_LIBRARY_PATH && \
-	cd examples/worker-rs && CARGO_BUILD_FLAGS="--release" cargo build --release
+	export DEBIAN_BUILD=1 && \
+	export RUSTFLAGS="-C link-arg=-Wl,-rpath=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib:/lib" && \
+	cd examples/worker-rs && cargo build --release
 
 override_dh_auto_test:
 	# Optionally run tests if needed
@@ -39,13 +42,7 @@ override_dh_auto_install:
 	# Install Rust binary
 	install -D -m755 examples/worker-rs/target/release/whisper-worker-rs \
 		$(CURDIR)/debian/whisper-cpp/usr/bin/whisper-worker-rs
-	# Update RPATH for Rust binary to use system library paths
-	# This ensures the binary finds libwhisper.so and libggml.so
-	# Include both /usr/lib and /lib paths for maximum compatibility
-	if command -v patchelf >/dev/null 2>&1; then \
-		patchelf --set-rpath '/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib:/lib' \
-			$(CURDIR)/debian/whisper-cpp/usr/bin/whisper-worker-rs 2>/dev/null || true; \
-	fi
+	# RPATH is already set correctly during build via RUSTFLAGS, no need for patchelf
 
 override_dh_strip:
 	# Exclude Rust binary from stripping - stripping breaks Tokio runtime

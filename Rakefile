@@ -56,10 +56,15 @@ namespace :build do
   end
 
   desc "Build all examples and targets (Release mode)"
-  task :all do
+  task :all => [:rust_worker] do
     ensure_configured
     sh "#{CMAKE} --build #{BUILD_DIR} -j --config #{BUILD_TYPE}"
     puts "\n✓ Built all targets in #{BUILD_DIR}/bin/"
+  end
+
+  # Helper task to build Rust worker (called by build:all)
+  task :rust_worker do
+    Rake::Task['build:rust:worker'].invoke
   end
 
   desc "Clean build directory"

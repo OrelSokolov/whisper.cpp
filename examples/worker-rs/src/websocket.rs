@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use log::{info, error, warn};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpStream;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use serde_json;
 use crate::whisper_ffi::{WhisperContextWrapper, WhisperSamplingStrategy};
@@ -224,6 +224,7 @@ async fn process_audio_websocket_raw(
 // Data structure for callback
 struct CallbackData {
     sender: Arc<StdMutex<Option<mpsc::UnboundedSender<SegmentData>>>>,
+    connection_alive: Arc<AtomicBool>,
     ctx_ptr: *mut crate::whisper_ffi::WhisperContext,
     audio_duration_s: f32,
     t_start_process_us: i64,
@@ -246,6 +247,19 @@ struct SegmentData {
     t1: i64,
 }
 
+// Abort callback function - called by whisper to check if processing should be aborted
+extern "C" fn abort_callback(user_data: *mut std::os::raw::c_void) -> bool {
+    use std::sync::atomic::Ordering;
+    unsafe {
+        if user_data.is_null() {
+            return false;
+        }
+        let callback_data = &*(user_data as *const CallbackData);
+        // Return true to abort if connection is broken
+        !callback_data.connection_alive.load(Ordering::Relaxed)
+    }
+}
+
 // Callback function called by whisper for each new segment
 extern "C" fn segment_callback(
     ctx: *mut crate::whisper_ffi::WhisperContext,
@@ -253,9 +267,19 @@ extern "C" fn segment_callback(
     n_new: c_int,
     user_data: *mut std::os::raw::c_void,
 ) {
-    use log::info;
+    use log::{info, warn};
+    use std::sync::atomic::Ordering;
     unsafe {
         let callback_data = &*(user_data as *const CallbackData);
+        
+        // Check if connection is still alive before processing segments
+        if !callback_data.connection_alive.load(Ordering::Relaxed) {
+            // Connection broken, close sender to stop sending segments
+            if let Ok(mut sender_guard) = callback_data.sender.lock() {
+                *sender_guard = None;
+            }
+            return;
+        }
         
         let n_segments = crate::whisper_ffi::whisper_full_n_segments(ctx);
         let s0 = n_segments - n_new;
@@ -266,7 +290,24 @@ extern "C" fn segment_callback(
         // Send new segments through channel
         if let Ok(sender_guard) = callback_data.sender.lock() {
             if let Some(sender) = sender_guard.as_ref() {
+                // Check connection again before sending each segment
+                if !callback_data.connection_alive.load(Ordering::Relaxed) {
+                    warn!("CALLBACK: Connection broken, closing sender");
+                    drop(sender_guard);
+                    // Close sender
+                    if let Ok(mut guard) = callback_data.sender.lock() {
+                        *guard = None;
+                    }
+                    return;
+                }
+                
                 for i in s0..n_segments {
+                    // Check connection before each segment
+                    if !callback_data.connection_alive.load(Ordering::Relaxed) {
+                        warn!("CALLBACK: Connection broken, stopping segment sending");
+                        break;
+                    }
+                    
                     let text_ptr = crate::whisper_ffi::whisper_full_get_segment_text(ctx, i);
                     let text = if text_ptr.is_null() {
                         String::new()
@@ -303,10 +344,16 @@ async fn process_audio_with_whisper_raw(
     _language: &str,
     _translate: bool,
 ) -> Result<TcpStream> {
+    // Whisper context is NOT thread-safe - ensure exclusive access
+    // The mutex in main.rs ensures only one connection processes at a time,
+    // but we add an extra check here to be safe
     let n_processors = params.n_processors;
     let n_threads = params.n_threads;
     let beam_size = params.beam_size;
     let no_timestamps = params.no_timestamps;
+    
+    // Create connection state flag to track if connection is still alive
+    let connection_alive = Arc::new(AtomicBool::new(true));
     
     // Send status message first
     let status_msg = StatusMessage {
@@ -315,17 +362,33 @@ async fn process_audio_with_whisper_raw(
     };
     let json = serde_json::to_string(&status_msg)?;
     info!("Sending status message: {}", json);
-    write_ws_frame(&mut stream, json.as_bytes(), WS_OPCODE_TEXT).await?;
-    info!("Status message sent successfully");
+    match write_ws_frame(&mut stream, json.as_bytes(), WS_OPCODE_TEXT).await {
+        Ok(()) => {
+            info!("Status message sent successfully");
+        }
+        Err(e) => {
+            // Check if it's a broken pipe error
+            if is_broken_pipe_error(&e) {
+                warn!("Connection broken while sending status message, stopping processing");
+                connection_alive.store(false, Ordering::Relaxed);
+                return Err(anyhow::anyhow!("Connection broken"));
+            }
+            return Err(e);
+        }
+    }
     
     info!("Starting whisper_full_parallel with {} samples, {} processors", pcmf32.len(), n_processors);
     
     // Create channel for streaming segments from callback
     let (tx, mut rx) = mpsc::unbounded_channel::<SegmentData>();
     
+    // Clone connection_alive for callback
+    let connection_alive_for_callback = connection_alive.clone();
+    
     // Prepare callback data
     let callback_data = Box::new(CallbackData {
         sender: Arc::new(StdMutex::new(Some(tx))),
+        connection_alive: connection_alive_for_callback,
         ctx_ptr: ctx.ctx(),
         audio_duration_s,
         t_start_process_us,
@@ -346,16 +409,38 @@ async fn process_audio_with_whisper_raw(
     // Clone params for async task
     let params_clone = params.clone();
     
+    // Clone connection_alive for async task
+    let connection_alive_clone = connection_alive.clone();
+    
     // Clone for async task that will stream results
     let stream_handle = tokio::task::spawn(async move {
         let mut count = 0;
         while let Some(segment) = rx.recv().await {
+            // Check if connection is still alive before attempting to send
+            if !connection_alive_clone.load(Ordering::Relaxed) {
+                warn!("Connection broken, stopping segment streaming");
+                break;
+            }
+            
             count += 1;
-            info!("Streaming segment {}: {} chars", segment.index, segment.text.len());
+            let segment_index = segment.index;
+            info!("Streaming segment {}: {} chars", segment_index, segment.text.len());
             
             let mut stream_guard = stream_clone.lock().await;
-            if let Err(e) = send_segment_data(&mut *stream_guard, segment, &params_clone, audio_duration_s, t_start_process_us).await {
-                error!("Failed to send segment: {}", e);
+            match send_segment_data(&mut *stream_guard, segment, &params_clone, audio_duration_s, t_start_process_us).await {
+                Ok(()) => {
+                    // Success, continue
+                }
+                Err(e) => {
+                    if is_broken_pipe_error(&e) {
+                        warn!("Connection broken while sending segment {}, stopping streaming", segment_index);
+                        connection_alive_clone.store(false, Ordering::Relaxed);
+                        break;
+                    } else {
+                        error!("Failed to send segment: {}", e);
+                        // Continue for other errors, but connection might be broken
+                    }
+                }
             }
             drop(stream_guard); // Release lock immediately
         }
@@ -375,8 +460,11 @@ async fn process_audio_with_whisper_raw(
     let lang_cstring = std::ffi::CString::new(lang_str.as_str()).unwrap();
     
     // Run whisper_full_parallel in blocking thread so callback can send data while processing
+    // Use catch_unwind to handle panics gracefully
     let processing_handle = tokio::task::spawn_blocking(move || {
-        unsafe {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            use std::sync::atomic::Ordering;
+            unsafe {
             let strategy = if beam_size > 1 {
                 WhisperSamplingStrategy::BeamSearch
             } else {
@@ -416,12 +504,17 @@ async fn process_audio_with_whisper_raw(
             wparams.suppress_nst = false;
             wparams.suppress_blank = true;
             
-            // Set callback
+            // Set callbacks
             wparams.new_segment_callback = segment_callback;
             wparams.new_segment_callback_user_data = callback_ptr_usize as *mut std::os::raw::c_void;
             
-            info!("Callback set: callback={:?}, user_data={:?}", 
+            // Set abort callback to allow interrupting processing when connection breaks
+            wparams.abort_callback = abort_callback;
+            wparams.abort_callback_user_data = callback_ptr_usize as *mut std::os::raw::c_void;
+            
+            info!("Callbacks set: segment_callback={:?}, abort_callback={:?}, user_data={:?}", 
                   wparams.new_segment_callback as *const (), 
+                  wparams.abort_callback as *const (),
                   wparams.new_segment_callback_user_data);
             let lang_str_debug = std::ffi::CStr::from_ptr(wparams.language).to_string_lossy();
             info!("Parameters: n_threads={}, language='{}', detect_language={}, no_context={}, print_realtime={}, single_segment={}", 
@@ -435,18 +528,33 @@ async fn process_audio_with_whisper_raw(
                 n_processors,
             );
             
-            info!("whisper_full_parallel completed, returned: {}", result);
-            
-            // Clean up callback data and close channel
+            // Get callback data to check if processing was aborted
             let callback_data = Box::from_raw(callback_ptr_usize as *mut CallbackData);
+            let was_aborted = !callback_data.connection_alive.load(Ordering::Relaxed);
+            
+            if was_aborted {
+                warn!("whisper_full_parallel was aborted due to connection break, returned: {}", result);
+            } else {
+                info!("whisper_full_parallel completed, returned: {}", result);
+            }
+            
             // Drop sender to signal completion
             if let Ok(mut sender_guard) = callback_data.sender.lock() {
                 *sender_guard = None;
             }
             drop(callback_data);
             
-            result
-        }
+            // Return error code if aborted
+            if was_aborted {
+                -1 // Return error code to indicate abort
+            } else {
+                result
+            }
+            }
+        })).unwrap_or_else(|panic_err| {
+            error!("Panic in whisper_full_parallel: {:?}", panic_err);
+            -1 // Return error code
+        })
     });
     
     // Wait for processing to complete
@@ -463,6 +571,13 @@ async fn process_audio_with_whisper_raw(
         return Err(anyhow::anyhow!("Failed to process audio (return code: {})", result));
     }
     
+    // Check if connection is still alive before sending completion message
+    if !connection_alive.load(Ordering::Relaxed) {
+        warn!("Connection broken, skipping completion message");
+        // Return error to indicate connection was broken
+        return Err(anyhow::anyhow!("Connection broken during processing"));
+    }
+    
     info!("All segments sent successfully");
     
     // Send completion message (like C++ version)
@@ -474,11 +589,21 @@ async fn process_audio_with_whisper_raw(
     
     {
         let mut stream_guard = stream_arc.lock().await;
-        if let Err(e) = write_ws_frame(&mut *stream_guard, json.as_bytes(), WS_OPCODE_TEXT).await {
-            error!("Failed to send completion message: {}", e);
-            return Err(e);
+        match write_ws_frame(&mut *stream_guard, json.as_bytes(), WS_OPCODE_TEXT).await {
+            Ok(()) => {
+                info!("Completion message sent successfully");
+            }
+            Err(e) => {
+                if is_broken_pipe_error(&e) {
+                    warn!("Connection broken while sending completion message");
+                    connection_alive.store(false, Ordering::Relaxed);
+                    return Err(anyhow::anyhow!("Connection broken"));
+                } else {
+                    error!("Failed to send completion message: {}", e);
+                    return Err(e);
+                }
+            }
         }
-        info!("Completion message sent successfully");
     } // Drop guard here
     
     // Give client time to receive the complete message
@@ -490,6 +615,18 @@ async fn process_audio_with_whisper_raw(
         .into_inner())
 }
 
+// Helper function to check if an error is a broken pipe error
+fn is_broken_pipe_error(e: &anyhow::Error) -> bool {
+    if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+        io_err.kind() == std::io::ErrorKind::BrokenPipe
+            || io_err.raw_os_error() == Some(32) // EPIPE on Linux
+    } else {
+        // Check if error message contains "Broken pipe"
+        e.to_string().contains("Broken pipe")
+            || e.to_string().contains("os error 32")
+    }
+}
+
 async fn send_segment_data(
     stream: &mut TcpStream,
     segment: SegmentData,
@@ -497,6 +634,7 @@ async fn send_segment_data(
     audio_duration_s: f32,
     t_start_process_us: i64,
 ) -> Result<()> {
+    // Check connection state before attempting to send - this prevents unnecessary write attempts
     let mut segment_msg = SegmentMessage {
         msg_type: "segment".to_string(),
         index: segment.index,
@@ -538,13 +676,20 @@ async fn send_segment_data(
     
     let json = serde_json::to_string(&segment_msg)?;
     info!("Sending segment {} JSON: {}", segment.index, json);
-    if let Err(e) = write_ws_frame(stream, json.as_bytes(), WS_OPCODE_TEXT).await {
-        error!("Failed to write WebSocket frame for segment {}: {}", segment.index, e);
-        return Err(e);
+    match write_ws_frame(stream, json.as_bytes(), WS_OPCODE_TEXT).await {
+        Ok(()) => {
+            info!("Segment {} sent successfully", segment.index);
+            Ok(())
+        }
+        Err(e) => {
+            if is_broken_pipe_error(&e) {
+                error!("Failed to write WebSocket frame for segment {}: {} (connection broken)", segment.index, e);
+            } else {
+                error!("Failed to write WebSocket frame for segment {}: {}", segment.index, e);
+            }
+            Err(e)
+        }
     }
-    info!("Segment {} sent successfully", segment.index);
-    
-    Ok(())
 }
 
 async fn send_segment_raw(

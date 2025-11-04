@@ -42,19 +42,24 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", ggml_abs.display());
     
     // Add rpath so the executable can find shared libraries at runtime
-    let src_rpath = if src_abs.exists() {
-        src_abs.canonicalize().unwrap_or(src_abs)
-    } else {
-        src_abs
-    };
-    let ggml_rpath = if ggml_abs.exists() {
-        ggml_abs.canonicalize().unwrap_or(ggml_abs)
-    } else {
-        ggml_abs
-    };
+    // Skip setting local rpath when building for debian package (RPATH will be set via RUSTFLAGS)
+    let skip_local_rpath = env::var("DEB_BUILD_ARCH").is_ok() || env::var("DEBIAN_BUILD").is_ok();
     
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", src_rpath.display());
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", ggml_rpath.display());
+    if !skip_local_rpath {
+        let src_rpath = if src_abs.exists() {
+            src_abs.canonicalize().unwrap_or(src_abs)
+        } else {
+            src_abs
+        };
+        let ggml_rpath = if ggml_abs.exists() {
+            ggml_abs.canonicalize().unwrap_or(ggml_abs)
+        } else {
+            ggml_abs
+        };
+        
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", src_rpath.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", ggml_rpath.display());
+    }
     
     // Link libraries (whisper and ggml are shared, common is static)
     println!("cargo:rustc-link-lib=dylib=whisper");
