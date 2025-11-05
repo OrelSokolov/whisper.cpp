@@ -50,7 +50,9 @@ LD_LIBRARY_PATH=/path/to/build/src:/path/to/build/ggml/src ./target/release/whis
 - `-tr, --translate` - Переводить на английский
 - `-nt, --no-timestamps` - Не включать временные метки
 - `-nc, --no-context` - Отключить контекст между сегментами
+- `--merge-timestamps` - Объединять временные метки для полных предложений (для TTS corpus)
 - `-v, --verbose` - Подробный вывод
+- `--port PORT` - Порт для прослушивания (по умолчанию: 8765)
 
 ### Пример
 
@@ -59,6 +61,37 @@ LD_LIBRARY_PATH=/path/to/build/src:/path/to/build/ggml/src ./target/release/whis
 ```
 
 Сервер запустится на порту 8765.
+
+### Режим объединения временных меток (--merge-timestamps)
+
+Этот режим предназначен для создания корпуса данных для обучения TTS моделей. При включении:
+
+1. Сегменты автоматически объединяются в полные предложения
+2. Неполные предложения накапливаются до завершения
+3. Предложения разделяются по точкам, восклицательным и вопросительным знакам
+4. Учитываются временные паузы между сегментами (>1.5 сек)
+
+**Пример для TTS corpus:**
+
+```bash
+./target/release/whisper-worker-rs \
+    --model ../../models/ggml-large-v3.bin \
+    --merge-timestamps
+```
+
+**Без `--merge-timestamps`** (обычный режим):
+```json
+{"type":"segment","index":0,"text":"Привет","start":0.0,"end":0.5}
+{"type":"segment","index":1,"text":", как дела","start":0.5,"end":1.2}
+{"type":"segment","index":2,"text":"?","start":1.2,"end":1.5}
+```
+
+**С `--merge-timestamps`**:
+```json
+{"type":"segment","index":0,"text":"Привет, как дела?","start":0.0,"end":1.5}
+```
+
+Подробнее см. [CORPUS.md](../../CORPUS.md)
 
 ## Протокол WebSocket
 
@@ -115,8 +148,11 @@ LD_LIBRARY_PATH=/path/to/build/src:/path/to/build/ggml/src ./target/release/whis
 - `main.rs` - точка входа, инициализация сервера
 - `whisper_ffi.rs` - FFI bindings для whisper.cpp
 - `websocket.rs` - обработка WebSocket соединений
+- `websocket_raw.rs` - низкоуровневая работа с WebSocket фреймами
+- `websocket_handshake.rs` - WebSocket handshake
 - `audio.rs` - декодирование аудио
 - `params.rs` - параметры конфигурации и сообщения
+- `segment_merger.rs` - объединение сегментов в полные предложения
 
 ## Отличия от C++ версии
 

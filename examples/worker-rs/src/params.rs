@@ -42,6 +42,7 @@ pub struct WhisperParams {
     pub suppress_nst: bool,
     pub verbose: bool,
     pub carry_initial_prompt: bool,
+    pub merge_timestamps: bool,
     
     pub language: String,
     pub prompt: String,
@@ -100,6 +101,7 @@ impl Default for WhisperParams {
             suppress_nst: false,
             verbose: false,
             carry_initial_prompt: false,
+            merge_timestamps: false,
             
             language: "auto".to_string(),
             prompt: String::new(),
@@ -113,7 +115,7 @@ impl Default for WhisperParams {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentMessage {
     #[serde(rename = "type")]
     pub msg_type: String,

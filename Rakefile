@@ -53,10 +53,28 @@ namespace :build do
         puts "\n✓ Built: #{worker_rs_dir}/target/release/whisper-worker-rs"
       end
     end
+
+    desc "Build corpus-client executable (Release mode)"
+    task :corpus_client do
+      corpus_client_dir = 'examples/corpus-client'
+      unless File.directory?(corpus_client_dir)
+        puts "Error: #{corpus_client_dir} directory not found"
+        exit 1
+      end
+      
+      Dir.chdir(corpus_client_dir) do
+        puts "Building corpus-client in #{corpus_client_dir}..."
+        unless system('cargo build --release')
+          puts "\n✗ Build failed"
+          exit 1
+        end
+        puts "\n✓ Built: #{corpus_client_dir}/target/release/corpus-client"
+      end
+    end
   end
 
   desc "Build all examples and targets (Release mode)"
-  task :all => [:rust_worker] do
+  task :all => [:rust_worker, :rust_corpus_client] do
     ensure_configured
     sh "#{CMAKE} --build #{BUILD_DIR} -j --config #{BUILD_TYPE}"
     puts "\n✓ Built all targets in #{BUILD_DIR}/bin/"
@@ -65,6 +83,11 @@ namespace :build do
   # Helper task to build Rust worker (called by build:all)
   task :rust_worker do
     Rake::Task['build:rust:worker'].invoke
+  end
+
+  # Helper task to build corpus-client (called by build:all)
+  task :rust_corpus_client do
+    Rake::Task['build:rust:corpus_client'].invoke
   end
 
   desc "Clean build directory"
@@ -226,13 +249,14 @@ task :help do
     ======================
 
     Build Tasks (all use Release mode by default):
-      rake build:worker         - Build whisper-worker executable (C++)
-      rake build:rust:worker   - Build whisper-worker-rs executable (Rust)
-      rake build:cli            - Build whisper-cli executable
-      rake build:all            - Build all examples and targets
-      rake build:deb            - Build DEB package for amd64 (includes all binaries)
-      rake build:clean          - Clean build directory
-      rake build:configure      - Configure CMake build system
+      rake build:worker              - Build whisper-worker executable (C++)
+      rake build:rust:worker         - Build whisper-worker-rs executable (Rust)
+      rake build:rust:corpus_client  - Build corpus-client executable (Rust)
+      rake build:cli                 - Build whisper-cli executable
+      rake build:all                 - Build all examples and targets
+      rake build:deb                 - Build DEB package for amd64 (includes all binaries)
+      rake build:clean               - Clean build directory
+      rake build:configure           - Configure CMake build system
 
     Configuration Tasks (all use Release mode by default):
       rake configure:vulkan - Configure with Vulkan GPU support

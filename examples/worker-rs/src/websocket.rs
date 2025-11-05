@@ -11,6 +11,7 @@ use crate::params::{WhisperParams, SegmentMessage, StatusMessage, CompleteMessag
 use crate::audio::{decode_audio_data, calculate_audio_duration};
 use crate::websocket_raw::{read_ws_frame, write_ws_frame, WS_OPCODE_TEXT, WS_OPCODE_BINARY, WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_CONT};
 use crate::websocket_handshake::perform_websocket_handshake;
+use crate::segment_merger::SegmentMerger;
 use std::os::raw::c_int;
 
 pub async fn handle_websocket_connection(
@@ -229,6 +230,7 @@ struct CallbackData {
     audio_duration_s: f32,
     t_start_process_us: i64,
     no_timestamps: bool,
+    merge_timestamps: bool,
 }
 
 // Safety: CallbackData is only used within the blocking task and callback
@@ -245,6 +247,7 @@ struct SegmentData {
     text: String,
     t0: i64,
     t1: i64,
+    is_final: bool,  // Indicates if this is the last segment
 }
 
 // Abort callback function - called by whisper to check if processing should be aborted
@@ -318,14 +321,18 @@ extern "C" fn segment_callback(
                     let t0 = crate::whisper_ffi::whisper_full_get_segment_t0(ctx, i);
                     let t1 = crate::whisper_ffi::whisper_full_get_segment_t1(ctx, i);
                     
+                    // Mark as final if it's the last segment in this callback
+                    let is_final = i == n_segments - 1;
+                    
                     let segment = SegmentData {
                         index: i,
                         text,
                         t0,
                         t1,
+                        is_final,
                     };
                     
-                    info!("CALLBACK: sending segment {} through channel", i);
+                    info!("CALLBACK: sending segment {} through channel (is_final: {})", i, is_final);
                     // Send through channel (ignore error if receiver dropped)
                     let _ = sender.send(segment);
                 }
@@ -393,6 +400,7 @@ async fn process_audio_with_whisper_raw(
         audio_duration_s,
         t_start_process_us,
         no_timestamps,
+        merge_timestamps: params.merge_timestamps,
     });
     
     let callback_data_ptr = Box::into_raw(callback_data);
@@ -412,22 +420,69 @@ async fn process_audio_with_whisper_raw(
     // Clone connection_alive for async task
     let connection_alive_clone = connection_alive.clone();
     
+    // Create segment merger
+    let merge_enabled = params.merge_timestamps;
+    
     // Clone for async task that will stream results
     let stream_handle = tokio::task::spawn(async move {
         let mut count = 0;
-        while let Some(segment) = rx.recv().await {
+        let mut merger = SegmentMerger::new(merge_enabled);
+        
+        while let Some(segment_data) = rx.recv().await {
             // Check if connection is still alive before attempting to send
             if !connection_alive_clone.load(Ordering::Relaxed) {
                 warn!("Connection broken, stopping segment streaming");
                 break;
             }
             
-            count += 1;
-            let segment_index = segment.index;
-            info!("Streaming segment {}: {} chars", segment_index, segment.text.len());
+            // Convert SegmentData to SegmentMessage
+            let segment_msg = SegmentMessage {
+                msg_type: "segment".to_string(),
+                index: segment_data.index,
+                text: segment_data.text.clone(),
+                start: if params_clone.no_timestamps { None } else { Some(segment_data.t0 as f64 * 0.01) },
+                end: if params_clone.no_timestamps { None } else { Some(segment_data.t1 as f64 * 0.01) },
+                progress: None,
+                eta: None,
+                speaker: None,
+            };
+            
+            // Process through merger
+            let merged_segments = merger.process_segment(segment_msg, segment_data.is_final);
+            
+            // Send merged segments
+            for mut merged in merged_segments {
+                count += 1;
+                let segment_index = merged.index;
+                info!("Streaming merged segment {}: {} chars", segment_index, merged.text.len());
+                
+                // Calculate progress and ETA
+                if audio_duration_s > 0.0 && !params_clone.no_timestamps {
+                    if let Some(end_time) = merged.end {
+                        let current_time_s = end_time as f32;
+                        let progress = (current_time_s / audio_duration_s * 100.0).min(100.0).max(0.0);
+                        merged.progress = Some(progress as f64);
+                        
+                        // Calculate ETA
+                        if current_time_s > 0.0 && t_start_process_us > 0 {
+                            let t_now_us = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_micros() as i64;
+                            let elapsed_s = (t_now_us - t_start_process_us) as f32 / 1_000_000.0;
+                            let current_realtime_factor = current_time_s / elapsed_s;
+                            let remaining_audio_s = audio_duration_s - current_time_s;
+                            let eta_s = remaining_audio_s / current_realtime_factor;
+                            
+                            if eta_s > 0.0 && eta_s < 3600.0 {
+                                merged.eta = Some(eta_s as f64);
+                            }
+                        }
+                    }
+                }
             
             let mut stream_guard = stream_clone.lock().await;
-            match send_segment_data(&mut *stream_guard, segment, &params_clone, audio_duration_s, t_start_process_us).await {
+                match send_segment_message(&mut *stream_guard, &merged).await {
                 Ok(()) => {
                     // Success, continue
                 }
@@ -444,6 +499,30 @@ async fn process_audio_with_whisper_raw(
             }
             drop(stream_guard); // Release lock immediately
         }
+        }
+        
+        // Flush any remaining segments
+        let remaining = merger.flush();
+        for segment in remaining {
+            if !connection_alive_clone.load(Ordering::Relaxed) {
+                break;
+            }
+            
+            count += 1;
+            let segment_index = segment.index;
+            info!("Streaming final merged segment {}: {} chars", segment_index, segment.text.len());
+            
+            let mut stream_guard = stream_clone.lock().await;
+            if let Err(e) = send_segment_message(&mut *stream_guard, &segment).await {
+                if is_broken_pipe_error(&e) {
+                    warn!("Connection broken while sending final segment {}", segment_index);
+                    connection_alive_clone.store(false, Ordering::Relaxed);
+                }
+                break;
+            }
+            drop(stream_guard);
+        }
+        
         info!("Segment streaming complete, {} segments sent", count);
     });
     
@@ -627,65 +706,26 @@ fn is_broken_pipe_error(e: &anyhow::Error) -> bool {
     }
 }
 
-async fn send_segment_data(
+async fn send_segment_message(
     stream: &mut TcpStream,
-    segment: SegmentData,
-    params: &WhisperParams,
-    audio_duration_s: f32,
-    t_start_process_us: i64,
+    segment_msg: &SegmentMessage,
 ) -> Result<()> {
-    // Check connection state before attempting to send - this prevents unnecessary write attempts
-    let mut segment_msg = SegmentMessage {
-        msg_type: "segment".to_string(),
-        index: segment.index,
-        text: escape_json_string(&segment.text),
-        start: None,
-        end: None,
-        progress: None,
-        eta: None,
-        speaker: None,
-    };
+    // Escape JSON string
+    let mut msg = segment_msg.clone();
+    msg.text = escape_json_string(&segment_msg.text);
     
-    if !params.no_timestamps {
-        segment_msg.start = Some(segment.t0 as f64 * 0.01);
-        segment_msg.end = Some(segment.t1 as f64 * 0.01);
-    }
-    
-    // Calculate progress and ETA
-    if audio_duration_s > 0.0 && !params.no_timestamps {
-        let current_time_s = segment.t1 as f32 * 0.01;
-        let progress = (current_time_s / audio_duration_s * 100.0).min(100.0).max(0.0);
-        segment_msg.progress = Some(progress as f64);
-        
-        // Calculate ETA
-        if current_time_s > 0.0 && t_start_process_us > 0 {
-            let t_now_us = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-            let elapsed_s = (t_now_us - t_start_process_us) as f32 / 1_000_000.0;
-            let current_realtime_factor = current_time_s / elapsed_s;
-            let remaining_audio_s = audio_duration_s - current_time_s;
-            let eta_s = remaining_audio_s / current_realtime_factor;
-            
-            if eta_s > 0.0 && eta_s < 3600.0 {
-                segment_msg.eta = Some(eta_s as f64);
-            }
-        }
-    }
-    
-    let json = serde_json::to_string(&segment_msg)?;
-    info!("Sending segment {} JSON: {}", segment.index, json);
+    let json = serde_json::to_string(&msg)?;
+    info!("Sending segment {} JSON: {}", msg.index, json);
     match write_ws_frame(stream, json.as_bytes(), WS_OPCODE_TEXT).await {
         Ok(()) => {
-            info!("Segment {} sent successfully", segment.index);
+            info!("Segment {} sent successfully", msg.index);
             Ok(())
         }
         Err(e) => {
             if is_broken_pipe_error(&e) {
-                error!("Failed to write WebSocket frame for segment {}: {} (connection broken)", segment.index, e);
+                error!("Failed to write WebSocket frame for segment {}: {} (connection broken)", msg.index, e);
             } else {
-                error!("Failed to write WebSocket frame for segment {}: {}", segment.index, e);
+                error!("Failed to write WebSocket frame for segment {}: {}", msg.index, e);
             }
             Err(e)
         }

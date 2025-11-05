@@ -4,6 +4,7 @@ mod websocket_raw;
 mod websocket_handshake;
 mod audio;
 mod params;
+mod segment_merger;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -51,6 +52,10 @@ struct Args {
     #[arg(short, long)]
     verbose: bool,
     
+    /// Merge timestamps for complete sentences
+    #[arg(long)]
+    merge_timestamps: bool,
+    
     /// Port to listen on
     #[arg(long, default_value_t = WHISPER_WORKER_PORT)]
     port: u16,
@@ -78,6 +83,7 @@ async fn main() -> Result<()> {
     params.no_timestamps = args.no_timestamps;
     params.no_context = args.no_context;
     params.verbose = args.verbose;
+    params.merge_timestamps = args.merge_timestamps;
     
     // Load model
     info!("Loading model: {}", params.model);
