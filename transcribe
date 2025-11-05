@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Автоматическая транскрипция YouTube видео
+# Использование: ./transcribe <URL>
+
+set -euo pipefail
+
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Функция для вывода ошибок
+error() {
+    echo -e "${RED}✗ Ошибка: $1${NC}" >&2
+    exit 1
+}
+
+# Функция для вывода информации
+info() {
+    echo -e "${BLUE}ℹ $1${NC}"
+}
+
+# Функция для вывода успеха
+success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+# Функция для очистки временных файлов
+cleanup() {
+    if [[ -n "${TEMP_AUDIO:-}" ]] && [[ -f "$TEMP_AUDIO" ]]; then
+        info "Удаление временного файла: $TEMP_AUDIO"
+        rm -f "$TEMP_AUDIO"
+    fi
+}
+
+# Установка обработчика очистки при выходе
+trap cleanup EXIT INT TERM
+
+# Проверка аргументов
+if [[ $# -eq 0 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Использование: $0 <YouTube URL>"
+    echo
+    echo "Описание:"
+    echo "  Автоматическая транскрипция YouTube видео через whisper worker"
+    echo
+    echo "Примеры:"
+    echo "  $0 https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    echo "  $0 'https://youtu.be/dQw4w9WgXcQ'"
+    echo
+    echo "Требования:"
+    echo "  - yt-dlp (standalone binary)"
+    echo "  - Ruby с gem websocket-client-simple"
+    echo "  - Запущенный whisper worker на хосте 'micro'"
+    exit 0
+fi
+
+YOUTUBE_URL="$1"
+
+# Проверка наличия yt-dlp
+if ! command -v yt-dlp &> /dev/null; then
+    error "yt-dlp не найден. Установите его: sudo wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp"
+fi
+
+# Проверка наличия ffmpeg (требуется для -x)
+if ! command -v ffmpeg &> /dev/null; then
+    error "ffmpeg не найден. Установите его: sudo apt install ffmpeg"
+fi
+
+# Проверка наличия client.rb
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLIENT_RB="$SCRIPT_DIR/examples/worker/client.rb"
+
+if [[ ! -f "$CLIENT_RB" ]]; then
+    error "client.rb не найден по пути: $CLIENT_RB"
+fi
+
+# Проверка наличия Ruby
+if ! command -v ruby &> /dev/null; then
+    error "Ruby не найден. Установите его: sudo apt install ruby"
+fi
+
+# Создание временного файла (без расширения, yt-dlp добавит .mp3)
+TEMP_BASE="$(mktemp -u)"
+TEMP_AUDIO="${TEMP_BASE}.mp3"
+
+info "Скачивание аудио из: $YOUTUBE_URL"
+echo
+
+# Скачивание аудио через yt-dlp
+if yt-dlp -x --audio-format mp3 -o "$TEMP_BASE" "$YOUTUBE_URL"; then
+    # yt-dlp автоматически добавит .mp3
+    if [[ ! -f "$TEMP_AUDIO" ]]; then
+        # Иногда yt-dlp создает файл с другим именем, попробуем найти
+        TEMP_AUDIO=$(find "$(dirname "$TEMP_BASE")" -name "$(basename "$TEMP_BASE")*" -type f 2>/dev/null | head -1)
+        if [[ -z "$TEMP_AUDIO" ]] || [[ ! -f "$TEMP_AUDIO" ]]; then
+            error "Файл скачан, но не найден"
+        fi
+    fi
+    success "Аудио скачано: $TEMP_AUDIO"
+    echo
+else
+    error "Не удалось скачать аудио из $YOUTUBE_URL"
+fi
+
+# Проверка размера файла
+FILE_SIZE=$(stat -c%s "$TEMP_AUDIO" 2>/dev/null || stat -f%z "$TEMP_AUDIO" 2>/dev/null)
+if [[ -z "$FILE_SIZE" ]] || [[ $FILE_SIZE -eq 0 ]]; then
+    error "Скачанный файл пуст или не найден"
+fi
+
+# Форматирование размера файла
+if command -v numfmt &> /dev/null; then
+    FORMATTED_SIZE=$(numfmt --to=iec-i --suffix=B $FILE_SIZE)
+else
+    FORMATTED_SIZE="$FILE_SIZE байт"
+fi
+
+success "Размер файла: $FORMATTED_SIZE"
+echo
+
+# Транскрипция через whisper worker
+info "Отправка на транскрипцию (хост: micro)..."
+printf '=%.0s' {1..60}
+echo
+echo
+
+# Запуск client.rb с параметрами
+if ruby "$CLIENT_RB" --host micro --no-timestamps "$TEMP_AUDIO"; then
+    echo
+    printf '=%.0s' {1..60}
+    echo
+    success "Транскрипция завершена успешно!"
+else
+    error "Не удалось выполнить транскрипцию"
+fi
+

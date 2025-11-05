@@ -36,7 +36,8 @@ end
 options = {
   host: 'localhost',
   port: 8765,
-  file: nil
+  file: nil,
+  no_timestamps: false
 }
 
 OptionParser.new do |opts|
@@ -48,6 +49,10 @@ OptionParser.new do |opts|
   
   opts.on('--port PORT', Integer, 'Порт сервера (по умолчанию: 8765)') do |port|
     options[:port] = port
+  end
+  
+  opts.on('--no-timestamps', 'Вывод без таймстампов (только текст)') do
+    options[:no_timestamps] = true
   end
   
   opts.on('-h', '--help', 'Показать эту справку') do
@@ -143,17 +148,23 @@ begin
       case json['type']
       when 'segment'
         # Выводим сегмент транскрипции
-        if json['start'] && json['end']
-          progress_str = json['progress'] ? " [#{format('%.1f', json['progress'])}%]" : ''
-          eta_str = json['eta'] ? " ETA: #{format('%d', json['eta'])}s" : ''
-          puts "[#{format('%.2f', json['start'])}s - #{format('%.2f', json['end'])}s]#{progress_str}#{eta_str} #{json['text']}"
-        else
+        if options[:no_timestamps]
+          # Только текст без таймстампов и метаинформации
           puts json['text']
-        end
-        
-        # Если есть информация о спикере
-        if json['speaker']
-          puts "  (спикер: #{json['speaker']})"
+        else
+          # Полный вывод с таймстампами и прогрессом
+          if json['start'] && json['end']
+            progress_str = json['progress'] ? " [#{format('%.1f', json['progress'])}%]" : ''
+            eta_str = json['eta'] ? " ETA: #{format('%d', json['eta'])}s" : ''
+            puts "[#{format('%.2f', json['start'])}s - #{format('%.2f', json['end'])}s]#{progress_str}#{eta_str} #{json['text']}"
+          else
+            puts json['text']
+          end
+          
+          # Если есть информация о спикере
+          if json['speaker']
+            puts "  (спикер: #{json['speaker']})"
+          end
         end
         
       when 'status'
