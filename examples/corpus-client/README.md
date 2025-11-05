@@ -6,6 +6,7 @@ Rust client for building TTS training corpus from audio files.
 
 - Download audio from YouTube using yt-dlp
 - Transcribe audio via Whisper WebSocket server
+- **Transcription caching** (avoid re-transcribing same files)
 - Merge timestamps for complete sentences
 - **Native audio processing** (10-20x faster than ffmpeg!)
 - Split audio into segments in-memory
@@ -57,11 +58,12 @@ The release build is optimized for maximum performance with parallel processing 
 Default configuration (optimized for Piper TTS):
 - Format: WAV (22050Hz, mono, 16-bit PCM)
 - Segment duration: 0.5-30 seconds
-- Parallel processing (all CPU cores)
+- Native audio processing (2-3 seconds for 1 hour!)
+- **Transcription caching** (instant on repeated runs)
 - **Vowel hotfix**: Adds 0.15s to segments ending with vowels
 - Generates `metadata.csv` in Piper format
 
-To disable Piper optimizations: `--no-piper`
+To disable: `--no-piper` (Piper mode), `--no-cache` (caching)
 
 ### Full Pipeline (YouTube → Dataset)
 
@@ -113,6 +115,7 @@ To disable Piper optimizations: `--no-piper`
 - `--max-duration` - Maximum segment duration in seconds (default: 30.0)
 - `--sample-rate` - Sample rate for output audio (default: **22050**)
 - `--no-piper` - **Disable Piper TTS optimizations** (mono, vowel hotfix)
+- `--no-cache` - **Disable transcription cache** (force re-transcription)
 - `--no-timestamps` - Text only mode (no timestamps)
 - `--output-timestamps` - Save timestamps to file
 - `--verbose` - Verbose logging

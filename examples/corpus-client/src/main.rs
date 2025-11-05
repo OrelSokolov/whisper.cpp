@@ -9,6 +9,7 @@ mod audio_splitter;
 mod audio_processor;
 mod downloader;
 mod merger;
+mod cache;
 
 use client::WhisperClient;
 use types::CorpusConfig;
@@ -64,6 +65,10 @@ struct Args {
     /// Disable Piper TTS optimizations (mono, vowel hotfix)
     #[arg(long)]
     no_piper: bool,
+
+    /// Disable transcription cache (force re-transcription)
+    #[arg(long)]
+    no_cache: bool,
 
     /// No timestamps mode (text only)
     #[arg(long)]
@@ -131,12 +136,12 @@ async fn main() -> Result<()> {
     } else if let Some(youtube_url) = args.youtube_url {
         // Full pipeline: download + transcribe + split
         info!("Running full pipeline from YouTube URL");
-        run_full_pipeline_youtube(&youtube_url, &config).await?;
+        run_full_pipeline_youtube(&youtube_url, &config, args.no_cache).await?;
 
     } else if let Some(audio_file) = args.audio_file {
         // Transcribe + split existing audio file
         info!("Running pipeline from audio file");
-        run_pipeline_from_audio(&audio_file, &config, args.output_timestamps.as_ref()).await?;
+        run_pipeline_from_audio(&audio_file, &config, args.output_timestamps.as_ref(), args.no_cache).await?;
 
     } else {
         return Err(anyhow::anyhow!(
@@ -168,6 +173,7 @@ async fn run_split_only(
 async fn run_full_pipeline_youtube(
     youtube_url: &str,
     config: &CorpusConfig,
+    no_cache: bool,
 ) -> Result<()> {
     // Step 1: Download from YouTube
     info!("Step 1/3: Downloading from YouTube...");
@@ -175,7 +181,7 @@ async fn run_full_pipeline_youtube(
 
     // Step 2: Transcribe
     info!("Step 2/3: Transcribing audio...");
-    let timestamps = transcribe_audio(&audio_file, config).await?;
+    let timestamps = transcribe_audio(&audio_file, config, no_cache).await?;
 
     // Step 3: Split audio
     info!("Step 3/3: Splitting audio into segments...");
@@ -188,10 +194,11 @@ async fn run_pipeline_from_audio(
     audio_file: &PathBuf,
     config: &CorpusConfig,
     output_timestamps: Option<&PathBuf>,
+    no_cache: bool,
 ) -> Result<()> {
     // Step 1: Transcribe
     info!("Step 1/2: Transcribing audio...");
-    let timestamps = transcribe_audio(audio_file, config).await?;
+    let timestamps = transcribe_audio(audio_file, config, no_cache).await?;
 
     // Save timestamps if requested
     if let Some(output_path) = output_timestamps {
@@ -212,7 +219,16 @@ async fn run_pipeline_from_audio(
 async fn transcribe_audio(
     audio_file: &PathBuf,
     config: &CorpusConfig,
+    no_cache: bool,
 ) -> Result<types::TimestampsFile> {
+    // Проверяем кэш (если не отключен)
+    if !no_cache {
+        if let Some(cached) = cache::load_from_cache(audio_file) {
+            info!("Using cached transcription, skipping Whisper server");
+            return Ok(cached);
+        }
+    }
+    
     let client = WhisperClient::new(&config.host, config.port);
     
     info!("Connecting to Whisper server at {}:{}...", config.host, config.port);
@@ -235,6 +251,13 @@ async fn transcribe_audio(
             confidence: None,
         }).collect(),
     };
+
+    // Сохраняем в кэш (если не отключен)
+    if !no_cache {
+        if let Err(e) = cache::save_to_cache(audio_file, &timestamps) {
+            warn!("Failed to save to cache: {}", e);
+        }
+    }
 
     Ok(timestamps)
 }

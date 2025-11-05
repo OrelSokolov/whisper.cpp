@@ -6,4 +6,5 @@
 *.m4a
 timestamps.json
 source_audio.*
+.cache/
 
