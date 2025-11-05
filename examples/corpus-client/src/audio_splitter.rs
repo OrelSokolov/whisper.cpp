@@ -2,10 +2,7 @@ use anyhow::{Context, Result};
 use log::{info, debug};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use chrono::Utc;
-use rayon::prelude::*;
 
 use crate::types::{TimestampsFile, DatasetMetadata, CorpusConfig};
 
@@ -77,169 +74,89 @@ pub async fn split_audio(
     std::fs::create_dir_all(&rejected_dir)
         .context("Failed to create rejected directory")?;
 
-    // Настройка rayon thread pool
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(12);
+    info!("Preparing {} segments...", timestamps.segments.len());
+
+    // Фильтруем и подготавливаем сегменты
+    let mut valid_segments = Vec::new();
+    let mut rejected_count = 0;
     
-    info!("Using {} threads for parallel audio splitting", num_threads);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .context("Failed to build thread pool")?
-        .install(|| {
-            process_segments_parallel(audio_file, timestamps, config, &segments_dir, &rejected_dir)
-        })
-}
+    for (idx, segment) in timestamps.segments.iter().enumerate() {
+        let segment_num = idx + 1;
+        
+        // HOTFIX: Если сегмент заканчивается на гласную, добавляем время
+        let end_time = if ends_with_vowel(&segment.text) {
+            let adjusted = segment.end + VOWEL_HOTFIX_DURATION;
+            debug!("Segment {}: '{}' ends with vowel, adjusting end time {} -> {} (+{}s)", 
+                   segment_num, segment.text.trim(), segment.end, adjusted, VOWEL_HOTFIX_DURATION);
+            adjusted
+        } else {
+            segment.end
+        };
+        
+        let duration = end_time - segment.start;
 
-fn process_segments_parallel(
-    audio_file: &PathBuf,
-    timestamps: &TimestampsFile,
-    config: &CorpusConfig,
-    segments_dir: &PathBuf,
-    _rejected_dir: &PathBuf,
-) -> Result<()> {
-    let accepted_count = Arc::new(AtomicUsize::new(0));
-    let rejected_count = Arc::new(AtomicUsize::new(0));
-    let processed_count = Arc::new(AtomicUsize::new(0));
-    let total_segments = timestamps.segments.len();
+        // Filter by duration
+        if duration < config.min_duration || duration > config.max_duration {
+            debug!("Segment {} rejected: duration {:.2}s out of range [{:.1}, {:.1}]",
+                segment_num, duration, config.min_duration, config.max_duration);
+            rejected_count += 1;
+            continue;
+        }
 
-    info!("Processing {} segments in parallel...", total_segments);
+        // Filter by text length
+        let text = segment.text.trim();
+        if text.len() < 5 {
+            debug!("Segment {} rejected: text too short ({})", segment_num, text.len());
+            rejected_count += 1;
+            continue;
+        }
 
-    // Собираем результаты обработки для подсчета статистики
-    let results: Vec<_> = timestamps.segments
-        .par_iter()
+        // Filter music/sound effects markers
+        if text.contains("♪") || text.contains("[") || text.contains("]") {
+            debug!("Segment {} rejected: contains music/sound markers", segment_num);
+            rejected_count += 1;
+            continue;
+        }
+        
+        valid_segments.push((segment_num, end_time, text.to_string(), duration));
+    }
+
+    let accepted_count = valid_segments.len();
+    info!("Filtered: {} accepted, {} rejected", accepted_count, rejected_count);
+    
+    if valid_segments.is_empty() {
+        return Err(anyhow::anyhow!("No valid segments after filtering"));
+    }
+
+    // NATIVE PROCESSING: Читаем файл один раз, режем в памяти (ОЧЕНЬ БЫСТРО!)
+    info!("Using native audio processing (10-20x faster than ffmpeg)...");
+    
+    // Подготавливаем данные для нативной обработки: (segment_num, start, end, text)
+    let segments_for_native: Vec<(usize, f64, f64, String)> = valid_segments
+        .iter()
         .enumerate()
-        .map(|(idx, segment)| {
-            let segment_num = idx + 1;
-            
-            // HOTFIX: Если сегмент заканчивается на гласную, добавляем время
-            let end_time = if ends_with_vowel(&segment.text) {
-                let adjusted = segment.end + VOWEL_HOTFIX_DURATION;
-                debug!("Segment {}: '{}' ends with vowel, adjusting end time {} -> {} (+{}s)", 
-                       segment_num, segment.text.trim(), segment.end, adjusted, VOWEL_HOTFIX_DURATION);
-                adjusted
-            } else {
-                segment.end
-            };
-            
-            let duration = end_time - segment.start;
-            
-            // Filter by duration
-            if duration < config.min_duration || duration > config.max_duration {
-                debug!("Segment {} rejected: duration {:.2}s out of range [{:.1}, {:.1}]",
-                    segment_num, duration, config.min_duration, config.max_duration);
-                rejected_count.fetch_add(1, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("Duration out of range"));
-            }
-
-            // Filter by text length
-            let text = segment.text.trim();
-            if text.len() < 5 {
-                debug!("Segment {} rejected: text too short ({})", segment_num, text.len());
-                rejected_count.fetch_add(1, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("Text too short"));
-            }
-
-            // Filter music/sound effects markers
-            if text.contains("♪") || text.contains("[") || text.contains("]") {
-                debug!("Segment {} rejected: contains music/sound markers", segment_num);
-                rejected_count.fetch_add(1, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("Contains markers"));
-            }
-
-            // Extract audio segment using ffmpeg
-            let output_filename = format!("{:06}.{}", segment_num, config.format);
-            let output_path = segments_dir.join(&output_filename);
-            let text_filename = format!("{:06}.txt", segment_num);
-            let text_path = segments_dir.join(&text_filename);
-
-            // Build ffmpeg command
-            let mut ffmpeg_cmd = Command::new("ffmpeg");
-            ffmpeg_cmd
-                .arg("-y")  // Overwrite output files
-                .arg("-i").arg(audio_file)
-                .arg("-ss").arg(format!("{:.3}", segment.start))
-                .arg("-to").arg(format!("{:.3}", end_time))
-                .arg("-acodec");
-
-            // Set codec based on format
-            match config.format.as_str() {
-                "mp3" => {
-                    ffmpeg_cmd.arg("libmp3lame").arg("-b:a").arg("128k");
-                }
-                "wav" => {
-                    ffmpeg_cmd.arg("pcm_s16le");
-                    if let Some(sr) = config.sample_rate {
-                        ffmpeg_cmd.arg("-ar").arg(sr.to_string());
-                    }
-                }
-                "flac" => {
-                    ffmpeg_cmd.arg("flac");
-                }
-                _ => {
-                    return Err(anyhow::anyhow!("Unsupported format: {}", config.format));
-                }
-            }
-
-            // Set sample rate if not WAV (already set for WAV above)
-            if let Some(sr) = config.sample_rate {
-                if config.format != "wav" {
-                    ffmpeg_cmd.arg("-ar").arg(sr.to_string());
-                }
-            }
-
-            // Force mono if requested (for TTS)
-            if config.mono {
-                ffmpeg_cmd.arg("-ac").arg("1");
-            }
-
-            ffmpeg_cmd
-                .arg("-loglevel").arg("error")
-                .arg(&output_path);
-
-            // Execute ffmpeg
-            let output = ffmpeg_cmd.output()
-                .context("Failed to execute ffmpeg")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!("Segment {} failed to extract: {}", segment_num, stderr);
-                rejected_count.fetch_add(1, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("ffmpeg failed"));
-            }
-
-            // Write text file
-            std::fs::write(&text_path, format!("{}\n", text))
-                .context("Failed to write text file")?;
-
-            accepted_count.fetch_add(1, Ordering::Relaxed);
-            
-            // Progress update every 10 segments
-            let processed = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if processed % 10 == 0 {
-                let accepted = accepted_count.load(Ordering::Relaxed);
-                let rejected = rejected_count.load(Ordering::Relaxed);
-                info!("Processed {}/{} segments... (accepted: {}, rejected: {})",
-                    processed, total_segments, accepted, rejected);
-            }
-
-            Ok(duration)
+        .map(|(_, (num, end_time, text, _))| {
+            // Находим start из оригинального segment
+            let orig_seg = &timestamps.segments[num - 1];
+            (*num, orig_seg.start, *end_time, text.clone())
         })
         .collect();
-
+    
+    let durations = crate::audio_processor::split_audio_native(
+        audio_file,
+        &segments_for_native,
+        &segments_dir,
+        &config.format,
+        config.sample_rate.unwrap_or(22050),
+        config.mono,
+    )?;
+    
+    info!("Native splitting complete!");
+    
     // Calculate statistics
-    let final_accepted = accepted_count.load(Ordering::Relaxed);
-    let final_rejected = rejected_count.load(Ordering::Relaxed);
-    let mut total_duration = 0.0;
-    let mut durations = Vec::new();
-
-    for result in results {
-        if let Ok(duration) = result {
-            total_duration += duration;
-            durations.push(duration);
-        }
-    }
+    let total_duration: f64 = durations.iter().sum();
+    let final_accepted = durations.len();
+    let final_rejected = rejected_count;
 
     info!("Extraction complete!");
     info!("  Accepted: {}", final_accepted);

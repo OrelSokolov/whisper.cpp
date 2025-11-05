@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod client;
 mod types;
 mod audio_splitter;
+mod audio_processor;
 mod downloader;
 mod merger;
 

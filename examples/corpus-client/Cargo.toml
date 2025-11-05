@@ -16,6 +16,11 @@ env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.8"
 
+# For native audio processing (FAST!)
+symphonia = { version = "0.5", features = ["all"] }
+hound = "3.5"  # Fast WAV writing
+rubato = "0.15"  # Resampling
+
 [profile.release]
 opt-level = 3
 lto = true

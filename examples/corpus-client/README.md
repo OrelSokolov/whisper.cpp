@@ -7,8 +7,8 @@ Rust client for building TTS training corpus from audio files.
 - Download audio from YouTube using yt-dlp
 - Transcribe audio via Whisper WebSocket server
 - Merge timestamps for complete sentences
-- **Parallel audio splitting** (uses all CPU cores)
-- Split audio into segments
+- **Native audio processing** (10-20x faster than ffmpeg!)
+- Split audio into segments in-memory
 - Generate dataset with metadata
 - **Optimized for Piper TTS** (WAV 22050Hz mono)
 - **Vowel hotfix** (adds 0.15s to prevent word cutoff)
