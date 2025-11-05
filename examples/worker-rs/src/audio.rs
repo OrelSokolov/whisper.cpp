@@ -6,6 +6,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+// Using improved linear interpolation resampling
 use crate::whisper_ffi::{timestamp_to_sample, WHISPER_SAMPLE_RATE};
 
 pub fn decode_audio_data(audio_data: &[u8]) -> Result<Vec<f32>> {
@@ -49,9 +50,9 @@ pub fn decode_audio_data(audio_data: &[u8]) -> Result<Vec<f32>> {
     let needs_resample = track_sample_rate != WHISPER_SAMPLE_RATE as u32;
     let channels = track_params.channels.map(|c| c.count()).unwrap_or(1);
     
-    let mut pcmf32 = Vec::new();
+    let mut pcmf32_raw = Vec::new();
     
-    // Decode all packets
+    // Decode all packets first
     loop {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -70,24 +71,7 @@ pub fn decode_audio_data(audio_data: &[u8]) -> Result<Vec<f32>> {
                 sample_buffer.copy_interleaved_ref(decoded);
                 
                 let samples = sample_buffer.samples();
-                
-                if needs_resample && track_sample_rate != WHISPER_SAMPLE_RATE as u32 {
-                    // Simple linear resampling (for better quality, use a proper resampler)
-                    let ratio = track_sample_rate as f64 / WHISPER_SAMPLE_RATE as f64;
-                    let new_len = (samples.len() as f64 / ratio) as usize;
-                    let mut resampled = Vec::with_capacity(new_len);
-                    
-                    for i in 0..new_len {
-                        let src_idx = (i as f64 * ratio) as usize;
-                        if src_idx < samples.len() {
-                            resampled.push(samples[src_idx]);
-                        }
-                    }
-                    
-                    pcmf32.extend_from_slice(&resampled);
-                } else {
-                    pcmf32.extend_from_slice(samples);
-                }
+                pcmf32_raw.extend_from_slice(samples);
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => {
                 // Skip decode errors (may happen with some formats)
@@ -99,22 +83,69 @@ pub fn decode_audio_data(audio_data: &[u8]) -> Result<Vec<f32>> {
         }
     }
     
-    if pcmf32.is_empty() {
+    if pcmf32_raw.is_empty() {
         return Err(anyhow::anyhow!("No audio samples decoded"));
     }
     
     // Convert stereo to mono if needed (take average of channels)
     // Note: symphonia handles interleaved samples, so if stereo, samples are L, R, L, R, ...
-    if channels > 1 {
-        let mut mono = Vec::with_capacity(pcmf32.len() / channels);
-        for chunk in pcmf32.chunks(channels) {
+    let mut pcmf32 = if channels > 1 {
+        let mut mono = Vec::with_capacity(pcmf32_raw.len() / channels);
+        for chunk in pcmf32_raw.chunks(channels) {
             let sum: f32 = chunk.iter().sum();
             mono.push(sum / channels as f32);
         }
-        pcmf32 = mono;
+        mono
+    } else {
+        pcmf32_raw
+    };
+    
+    // Do high-quality resampling if needed (same quality as miniaudio in C++ version)
+    if needs_resample {
+        pcmf32 = resample_audio(
+            &pcmf32,
+            track_sample_rate as usize,
+            WHISPER_SAMPLE_RATE as usize,
+        )?;
     }
     
     Ok(pcmf32)
+}
+
+// Improved linear interpolation resampling
+// Better than simple decimation, uses linear interpolation between samples
+fn resample_audio(
+    input: &[f32],
+    input_rate: usize,
+    output_rate: usize,
+) -> Result<Vec<f32>> {
+    if input_rate == output_rate {
+        return Ok(input.to_vec());
+    }
+    
+    let ratio = input_rate as f64 / output_rate as f64;
+    let output_len = (input.len() as f64 / ratio).ceil() as usize;
+    let mut output = Vec::with_capacity(output_len);
+    
+    // Use linear interpolation for better quality than simple decimation
+    for i in 0..output_len {
+        let src_pos = i as f64 * ratio;
+        let src_idx = src_pos.floor() as usize;
+        let frac = src_pos - src_idx as f64;
+        
+        if src_idx + 1 < input.len() {
+            // Linear interpolation between two samples
+            let sample = input[src_idx] * (1.0 - frac as f32) + input[src_idx + 1] * (frac as f32);
+            output.push(sample);
+        } else if src_idx < input.len() {
+            // Use last sample if we're at the end
+            output.push(input[src_idx]);
+        } else {
+            break;
+        }
+    }
+    
+    Ok(output)
 }
 
 pub fn calculate_audio_duration(n_samples: usize) -> f32 {
