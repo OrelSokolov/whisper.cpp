@@ -26,6 +26,9 @@ FetchContent_Declare(
     GIT_TAG        v2.1.0
     GIT_SHALLOW    TRUE
 )
+# termcolor v2.1.0 declares cmake_minimum_required(VERSION 3.0), which is
+# rejected by modern CMake. Allow it to configure with a newer minimum.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_MakeAvailable(termcolor)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
