@@ -98,6 +98,11 @@ if (Vulkan_FOUND)
     )
 
     target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
+    # find_package(SPIRV-Headers) above only locates the package; without
+    # linking the imported target its INTERFACE include dir never reaches the
+    # compiler and <spirv/unified1/spirv.hpp> fails to resolve when the
+    # headers live outside the default include path (e.g. ~/.local).
+    target_link_libraries(ggml-vulkan PRIVATE SPIRV-Headers::SPIRV-Headers)
     target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build
